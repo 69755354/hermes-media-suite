@@ -19,7 +19,7 @@ def collect_with_playwright(query: str, output: Path, limit: int = 5) -> list[di
 
     results: list[dict[str, str]] = []
     with sync_playwright() as api:
-        candidates = sorted(glob.glob("/home/ubuntu/.cache/ms-playwright/chromium-*/chrome-linux*/chrome"), reverse=True)
+        candidates = sorted(glob.glob(str(Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright") / "chromium-*" / "chrome-linux*" / "chrome")), reverse=True)
         executable = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH") or (candidates[0] if candidates else None)
         browser = api.chromium.launch(headless=True, executable_path=executable)
         page = browser.new_page(user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36")

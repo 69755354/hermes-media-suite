@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SEED_PATH = Path("/home/ubuntu/.hermes/keys/receipt_signing.hex")
+SEED_PATH = Path(os.environ.get("RECEIPT_SEED_PATH") or Path.home() / ".hermes" / "keys" / "receipt_signing.hex")
 
 #: mirrors agent/winport/approval.py:ASCII_SAFE
 ASCII_SAFE = re.compile(r"^[A-Za-z0-9._:\-]{1,64}$")

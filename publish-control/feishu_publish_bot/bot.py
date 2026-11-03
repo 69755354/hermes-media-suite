@@ -4110,8 +4110,8 @@ def _fmt_slot(value):
         ts, _dt.timezone(_dt.timedelta(hours=8))).strftime("%H:%M")
 
 
-CONTROL_DB = os.environ.get(
-    "CONTROL_DB", "/home/ubuntu/workflow/projects/publish_control/control.db")
+CONTROL_DB = os.environ.get("CONTROL_DB") or os.path.join(
+    os.path.dirname(_HERE), "control.db")
 
 
 def remote_op(customer_id, op, args=None, timeout=120, device_id=None):
@@ -5550,7 +5550,8 @@ def _mt_change_schedule_locked(chat_id, text):
 
 
 MAT_DIR = os.environ.get("MAT_DIR") or "C:\\Users\\<USER>\\Desktop\\发布素材"
-CONTROL_DB = os.environ.get("CONTROL_DB", "/home/ubuntu/workflow/projects/publish_control/control.db")
+CONTROL_DB = os.environ.get("CONTROL_DB") or os.path.join(
+    os.path.dirname(_HERE), "control.db")
 
 
 def _cp_remote(customer_id, op, args, timeout=25, device_id=None):

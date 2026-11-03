@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -19,8 +20,11 @@ class RemoteExecutionClient:
     """封装 Execute API 持久任务及跨机文件传输。"""
 
     _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+    _RESULT_ROOT = os.environ.get("XG_FACTORY_RESULT_ROOT") or str(
+        Path.home() / ".hermes" / "profiles" / "customer" / "cache"
+    )
     _SAFE_RESULT = re.compile(
-        r"^/home/ubuntu/\.hermes/profiles/customer/cache/[A-Za-z0-9_-]+_final\.mp4$"
+        "^" + re.escape(_RESULT_ROOT.rstrip("/")) + r"/[A-Za-z0-9_-]+_final\.mp4$"
     )
 
     def __init__(
