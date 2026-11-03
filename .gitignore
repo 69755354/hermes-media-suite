@@ -1,0 +1,30 @@
+# secrets / runtime data
+.env
+*.env
+control.db
+*.db
+*.sqlite3
+*.sqlite3-*
+*.log
+*.log.*
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# build / evidence artifacts
+build_*/
+publish_pkg/
+backups/
+evidence/
+review/
+*.zip
+
+# local state
+state/
+work/
+profiles/
+runtime/
+jobs/

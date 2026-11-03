@@ -1,0 +1,12 @@
+soft_confirm_timeout_hours: 24
+required_touch_count: 2
+revision_limit: 2
+confirm_merge_topic_copy: true
+demo_timeout_hours: 0.08
+auto_advance_requires_notifications: true
+rollback_scope_map:
+  topic: topic_change
+  copy: copy_small_change
+  typo: typo_only
+  shot: shot_only_change
+  technical: tech_issue

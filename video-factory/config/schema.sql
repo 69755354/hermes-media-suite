@@ -1,0 +1,18 @@
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,name TEXT NOT NULL,contact TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,client_id TEXT NOT NULL REFERENCES clients(id),project_dir TEXT NOT NULL UNIQUE,entry_type TEXT NOT NULL,industry TEXT NOT NULL,city TEXT NOT NULL,prefs_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS cycles(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,name TEXT NOT NULL,period TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS pieces(id TEXT PRIMARY KEY,cycle_id TEXT NOT NULL REFERENCES cycles(id) ON DELETE CASCADE,format TEXT NOT NULL,platform TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS node_runs(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,node_id TEXT NOT NULL,cycle_id TEXT,piece_id TEXT,status TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,started_at TEXT,finished_at TEXT,error_class TEXT,executor TEXT,UNIQUE(project_id,node_id,cycle_id,piece_id));
+CREATE TABLE IF NOT EXISTS artifacts_index(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,artifact_id TEXT NOT NULL,cycle_id TEXT,piece_id TEXT,path TEXT NOT NULL,sha256 TEXT NOT NULL,client_view_id TEXT,exported_at TEXT,mock INTEGER NOT NULL DEFAULT 0,UNIQUE(project_id,artifact_id,cycle_id,piece_id));
+CREATE TABLE IF NOT EXISTS client_confirmations(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,confirm_id TEXT NOT NULL,piece_id TEXT NOT NULL,decision TEXT,note TEXT NOT NULL DEFAULT '',revise_scope TEXT,touched_count INTEGER NOT NULL DEFAULT 0,deadline_at TEXT,decided_at TEXT,actor_type TEXT,revision_count INTEGER NOT NULL DEFAULT 0,UNIQUE(project_id,confirm_id,piece_id));
+CREATE TABLE IF NOT EXISTS internal_reviews(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,gate_id TEXT NOT NULL,cycle_id TEXT,piece_id TEXT,decision TEXT NOT NULL,reviewer TEXT NOT NULL,evidence_path TEXT NOT NULL,gate_stdout TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS costs(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,piece_id TEXT,provider TEXT NOT NULL,unit TEXT,qty REAL,amount REAL,provider_task_id TEXT,authorized_by TEXT,idempotency_key TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,orig_name TEXT NOT NULL,stored_name TEXT NOT NULL,mime TEXT NOT NULL,bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,used_in_json TEXT NOT NULL DEFAULT '[]',uploaded_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notifications(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,kind TEXT NOT NULL,channel TEXT NOT NULL,sent_at TEXT NOT NULL,payload_digest TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT NOT NULL,actor TEXT NOT NULL,actor_type TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,prev_hash TEXT NOT NULL,hash TEXT NOT NULL UNIQUE,detail_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_node_runs_project ON node_runs(project_id,node_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts_index(project_id,client_view_id);
+CREATE INDEX IF NOT EXISTS idx_confirmations_pending ON client_confirmations(project_id,decision,deadline_at);
+CREATE INDEX IF NOT EXISTS idx_reviews_project ON internal_reviews(project_id,created_at);

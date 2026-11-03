@@ -1,0 +1,46 @@
+{
+  "groups": {
+    "extreme_words": {
+      "level": "block",
+      "message": "极限或绝对化表述",
+      "terms": ["国家级", "世界级", "全网第一", "行业第一", "最好", "唯一", "百分之百", "100%有效", "绝对", "永久"]
+    },
+    "send_away_words": {
+      "level": "block",
+      "message": "送客词：导向第三方免费替代服务",
+      "terms": ["心理援助热线", "400-161-9995", "12356", "全国心理援助", "心理危机干预热线", "免费在线问诊平台", "政府免费培训", "公益免费咨询热线"]
+    },
+    "general_risks": {
+      "level": "warn",
+      "message": "需人工核验事实或承诺边界",
+      "terms": ["保证", "承诺", "无效退款", "立刻见效"]
+    },
+    "medical": {
+      "level": "block",
+      "message": "医疗健康疗效承诺",
+      "terms": ["治疗", "治愈", "根治", "矫正视力", "恢复视力", "降低度数", "消炎", "杀菌"]
+    },
+    "finance": {
+      "level": "block",
+      "message": "金融收益或荐股风险",
+      "terms": ["稳赚", "保本", "荐股", "内幕消息", "收益保证", "年化保证"]
+    },
+    "education": {
+      "level": "block",
+      "message": "教育结果承诺",
+      "terms": ["保过", "包就业", "保证提分", "押题必中", "不过退款"]
+    },
+    "metaphysics": {
+      "level": "block",
+      "message": "玄学恐吓或付费命理风险",
+      "terms": ["算命", "改命", "消灾", "转运必成", "不做就倒霉", "破财挡灾"]
+    }
+  },
+  "industry_keywords": {
+    "医疗": "medical", "医美": "medical", "健康": "medical", "保健": "medical", "护眼": "medical",
+    "金融": "finance", "理财": "finance", "投资": "finance", "保险": "finance",
+    "教育": "education", "培训": "education", "课程": "education",
+    "风水": "metaphysics", "命理": "metaphysics", "运势": "metaphysics"
+  }
+}
+

@@ -1,0 +1,387 @@
+# 客户内容需求表单统一契约
+# > 执行者：codex
+
+meta:
+  contract_id: INDUSTRY_FORM_SCHEMA
+  version: "3.0.0"
+  status: active
+  updated_at: "2026-08-16"
+  json_schema_dialect: "https://json-schema.org/draft/2020-12/schema"
+  business_scope: 按探店、剧情、口播三类制作短视频内容
+  design_rule: 每个字段必须直接服务于选题、文案、画面、转化或素材授权
+  required_field_limit: 10
+  first_question: content_type
+  customer_type_collection: inferred_by_workflow
+  explicitly_excluded:
+    - 营业执照
+    - 经营资质尽调
+    - 酒水清单与瓶子信息
+    - 预约排队方式
+    - 营业例外
+    - 过敏原
+    - 库存规则
+    - 套餐有效期
+
+# 客户看到的行业入口。所有 enabled 行业共用通用字段，内容类型是第一问；
+# 探店、剧情、口播再按各自分支收字段和素材，客户类型不向客户提问。
+industry_taxonomy:
+  - code: catering
+    label: 餐饮
+    enabled: true
+    children:
+      - code: hotpot
+        label: 火锅
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: hotpot
+        redline_profile: 餐饮
+      - code: barbecue
+        label: 烧烤
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: barbecue
+        redline_profile: 餐饮
+      - code: fast_food
+        label: 快餐/小吃
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: fast_food
+        redline_profile: 餐饮
+      - code: cafe_tea
+        label: 咖啡茶饮
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: cafe_tea
+        redline_profile: 餐饮
+      - code: restaurant
+        label: 正餐
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: restaurant
+        redline_profile: 餐饮
+      - code: bakery
+        label: 烘焙
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: bakery
+        redline_profile: 餐饮
+  - code: medical_aesthetics
+    label: 医疗美容
+    enabled: true
+    children:
+      - code: store
+        label: 医美门店
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: medical_aesthetics
+        redline_profile: 医美健康
+  - code: education_k12
+    label: K12 学科培训
+    enabled: false
+    disabled_reason: 平台内容业务不承接 K12 学科培训推广
+  - code: other
+    label: 其他实体商家
+    enabled: true
+    children:
+      - code: local_business
+        label: 其他本地生活/零售服务
+        enabled: true
+        schema_ref: "#/submission_schema"
+        form_profile: generic_local_business
+        redline_profile: 通用
+
+# “为什么要问”直接写进契约，新增字段时必须先补用途。
+field_purposes:
+  content_type: huoshan 节点0第一判别维度，决定后续字段、素材要求和生产通道
+  industry_path: 决定行业话术、素材建议和合规红线
+  business_name: 用于标题、字幕、门头核对和到店识别
+  address: 用于同城表达、位置字幕和到店引导
+  contact: 用于项目沟通；客户明确同意公开时才进入内容
+  signature_item: 决定主要选题、特写对象和脚本主线
+  selling_points: 提炼差异化钩子和可信卖点
+  average_spend_fen: 判断价格表达、目标客群和内容角度
+  offer: 决定本条内容具体推广什么以及如何转化
+  evidence_assets: 为门头、环境、产品和过程画面提供真实素材
+  content_authorization: 确认可以拍摄并使用客户素材制作内容
+  drama_direction: 决定剧情走单人剧情还是双人对手戏
+  character_count: 锁定剧情角色数量，防止人物设定与剧本方向冲突
+  oral_content_direction: 记录口播本次要讲的内容方向
+  reference_style: 记录口播参考风格，不代替真实出镜人素材
+
+form_profiles:
+  hotpot:
+    required_field_count: 10
+    signature_label: 招牌锅底/菜品
+    signature_placeholder: 例如：手工牛油锅底、鲜切黄牛肉
+    material_hint: 上传门头、店内、锅底、菜品、出锅或服务过程实拍
+  barbecue:
+    required_field_count: 10
+    signature_label: 招牌烤品
+    signature_placeholder: 例如：现切羊肉串、炭烤生蚝
+    material_hint: 上传门头、烤炉、食材、烤制过程和成品实拍
+  fast_food:
+    required_field_count: 10
+    signature_label: 招牌单品
+    signature_placeholder: 例如：现炒盖码饭、手工馄饨
+    material_hint: 上传门头、点餐区、出餐过程、招牌单品和套餐实拍
+  cafe_tea:
+    required_field_count: 10
+    signature_label: 招牌饮品/甜点
+    signature_placeholder: 例如：桂花拿铁、鲜果茶
+    material_hint: 上传门头、店内氛围、制作过程、杯型和成品实拍
+  restaurant:
+    required_field_count: 10
+    signature_label: 招牌菜
+    signature_placeholder: 例如：砂锅焗鱼头、招牌烧鹅
+    material_hint: 上传门头、包间/大厅、后厨过程、菜品和上桌实拍
+  bakery:
+    required_field_count: 10
+    signature_label: 招牌烘焙产品
+    signature_placeholder: 例如：现烤可颂、生日蛋糕
+    material_hint: 上传门头、陈列、制作过程、出炉和成品实拍
+  medical_aesthetics:
+    required_field_count: 10
+    signature_label: 主推项目/服务
+    signature_placeholder: 只写真实项目名称，不填写疗效承诺
+    material_hint: 上传门头、环境、设备、规范服务过程和真实价格素材；不上传患者隐私
+  generic_local_business:
+    required_field_count: 10
+    signature_label: 招牌产品/服务
+    signature_placeholder: 写这次最想让顾客记住的一个产品或服务
+    material_hint: 上传门头、环境、产品、服务过程和价格实拍
+
+submission_schema:
+  $schema: "https://json-schema.org/draft/2020-12/schema"
+  $id: "https://workflow.local/schemas/industry-form/content-request-v3.json"
+  title: huoshan 节点0短视频信息采集表
+  type: object
+  additionalProperties: false
+  required:
+    - content_type
+    - industry_path
+    - business_name
+    - address
+    - contact
+    - selling_points
+    - evidence_assets
+    - content_authorization
+  properties:
+    content_type:
+      type: string
+      enum: [store_visit, drama, oral]
+      description: 第一问；分别对应探店视频、剧情视频、口播视频
+    industry_path:
+      type: string
+      enum:
+        - catering/hotpot
+        - catering/barbecue
+        - catering/fast_food
+        - catering/cafe_tea
+        - catering/restaurant
+        - catering/bakery
+        - medical_aesthetics/store
+        - other/local_business
+    business_name:
+      type: string
+      minLength: 1
+      maxLength: 120
+    address:
+      type: string
+      minLength: 3
+      maxLength: 300
+    contact:
+      type: string
+      minLength: 3
+      maxLength: 120
+    signature_item:
+      type: string
+      minLength: 1
+      maxLength: 120
+    selling_points:
+      type: array
+      minItems: 1
+      maxItems: 6
+      uniqueItems: true
+      items:
+        type: string
+        minLength: 1
+        maxLength: 120
+    average_spend_fen:
+      type: integer
+      minimum: 0
+      maximum: 10000000
+      description: 客单价，人民币分
+    offer:
+      type: object
+      additionalProperties: false
+      required: [name, specification, amount_fen]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        specification:
+          type: string
+          minLength: 1
+          maxLength: 300
+        amount_fen:
+          type: integer
+          minimum: 0
+          maximum: 100000000
+    drama_direction:
+      type: string
+      enum: [single, dual]
+    character_count:
+      type: integer
+      minimum: 1
+      maximum: 2
+    oral_content_direction:
+      type: string
+      minLength: 1
+      maxLength: 300
+    reference_style:
+      type: string
+      minLength: 1
+      maxLength: 300
+    evidence_assets:
+      type: array
+      minItems: 0
+      maxItems: 20
+      items:
+        type: object
+        additionalProperties: false
+        required: [asset_id, evidence_type, store_id, rights_confirmed]
+        properties:
+          asset_id:
+            type: string
+            pattern: '^asset_[A-Za-z0-9_-]+$'
+          evidence_type:
+            enum:
+              - storefront_photo
+              - interior_photo
+              - product_photo
+              - menu_photo
+              - price_board_photo
+              - dish_photo
+              - service_process_photo
+              - drama_scene_reference
+              - character_reference
+              - presenter_portrait
+              - other
+          store_id:
+            const: store_main
+          rights_confirmed:
+            const: true
+    content_authorization:
+      type: object
+      additionalProperties: false
+      required: [accepted]
+      properties:
+        accepted:
+          const: true
+        portrait_confirmed:
+          type: boolean
+          default: false
+    piece_format:
+      enum: [VIDEO_SHORT, IMAGE_POST]
+      default: VIDEO_SHORT
+    platform:
+      type: string
+      minLength: 1
+      maxLength: 40
+      default: 抖音
+    prefs:
+      type: object
+      additionalProperties: false
+      properties:
+        show_process:
+          enum: [full, result_only]
+          default: full
+  allOf:
+    - if:
+        properties:
+          content_type: {const: store_visit}
+        required: [content_type]
+      then:
+        required: [signature_item, average_spend_fen, offer]
+        properties:
+          evidence_assets:
+            allOf:
+              - contains:
+                  type: object
+                  properties:
+                    evidence_type: {const: storefront_photo}
+                  required: [evidence_type]
+                minContains: 1
+              - contains:
+                  type: object
+                  properties:
+                    evidence_type:
+                      enum: [product_photo, menu_photo, dish_photo]
+                  required: [evidence_type]
+                minContains: 1
+        not:
+          anyOf:
+            - required: [drama_direction]
+            - required: [character_count]
+            - required: [oral_content_direction]
+            - required: [reference_style]
+    - if:
+        properties:
+          content_type: {const: drama}
+        required: [content_type]
+      then:
+        required: [drama_direction, character_count]
+        allOf:
+          - if:
+              properties:
+                drama_direction: {const: single}
+              required: [drama_direction]
+            then:
+              properties:
+                character_count: {const: 1}
+          - if:
+              properties:
+                drama_direction: {const: dual}
+              required: [drama_direction]
+            then:
+              properties:
+                character_count: {const: 2}
+        not:
+          anyOf:
+            - required: [signature_item]
+            - required: [average_spend_fen]
+            - required: [offer]
+            - required: [oral_content_direction]
+            - required: [reference_style]
+    - if:
+        properties:
+          content_type: {const: oral}
+        required: [content_type]
+      then:
+        properties:
+          evidence_assets:
+            contains:
+              type: object
+              properties:
+                evidence_type: {const: presenter_portrait}
+              required: [evidence_type]
+            minContains: 1
+        not:
+          anyOf:
+            - required: [signature_item]
+            - required: [average_spend_fen]
+            - required: [offer]
+            - required: [drama_direction]
+            - required: [character_count]
+
+cross_entity_assertions:
+  - id: ENABLED_INDUSTRY_ONLY
+    expression: industry_path in enabled industry_taxonomy paths
+    on_failure: 400
+  - id: ASSET_IDS_UNIQUE
+    expression: evidence_assets[].asset_id unique
+    on_failure: 400
+  - id: CONTENT_AUTHORIZED
+    expression: content_authorization.accepted == true
+    on_failure: 400

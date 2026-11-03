@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""teamctl：团队系统的唯一入口（团长/组员都用它）。"""
+import argparse, json, pathlib, sys, time
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from teamd import engine, adapters, db
+from teamd.engine import Blocked, PIPE, STAGE, ROLES
+
+ROOT = pathlib.Path(__file__).resolve().parent
+CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+
+def cur_stage(tid):
+    r = engine.status(tid)
+    for s in r["stages"]:
+        if s["status"] in ("working", "blocked", "ready"):
+            return s["stage_id"]
+    return None
+
+def out(msg): print(msg)
+
+def run(fn):
+    try:
+        return fn()
+    except Blocked as e:
+        print(f"BLOCKED: {e}"); sys.exit(2)
+    except adapters.NotWired as e:
+        print(f"NOT_WIRED: {e}"); sys.exit(3)
+
+def c_add(a):
+    tid = engine.add_task(a.title, a.batch, a.account, a.budget)
+    out(f"{tid} 已建：{a.title}｜预算上限 {a.budget} 次付费调用")
+
+def c_next(a):
+    rows = engine.next_ready()
+    if not rows: out("没有可开工的任务"); return
+    for r in rows:
+        out(f"{r['task_id']} {STAGE[r['stage_id']]['name']:<4} {ROLES.get(r['assignee'],{}).get('name',r['assignee']):<4} {r['title']}")
+
+def c_status(a):
+    if a.id:
+        r = engine.status(a.id); t = r["task"]
+        out(f"{t['id']} {t['title']}｜批次 {t['batch']}｜账号 {t['account']}｜{t['status']}")
+        for s in r["stages"]:
+            mark = {"done":"✓","working":"▶","blocked":"!","ready":"·","pending":" "}.get(s["status"],"?")
+            extra = f" 卡点:{s['blocked_reason']}" if s["blocked_reason"] else ""
+            out(f" {mark} {STAGE[s['stage_id']]['name']:<4} {s['status']:<8} 承接 {ROLES.get(s['assignee'],{}).get('name',s['assignee']):<4} 调用 {s['used_calls']}/{s['budget_calls'] or t['budget_calls']}{extra}")
+        for a in r["artifacts"]:
+            out(f"   产出 {a['stage_id']} {a['path']} ({a['size']}B)")
+        return
+    rows = engine.status()
+    if not rows: out("看板是空的"); return
+    for x in rows:
+        t, c = x["task"], x["current"]
+        if c:
+            out(f"{t['id']} {STAGE[c['stage_id']]['name']:<4} {c['status']:<8} {ROLES.get(c['assignee'],{}).get('name',c['assignee']):<4} {t['title']}" + (f" 卡点:{c['blocked_reason']}" if c["blocked_reason"] else ""))
+        else:
+            out(f"{t['id']} {'-':<4} {t['status']:<8} {'-':<4} {t['title']}")
+
+def c_brief(a):
+    sid = a.stage or cur_stage(a.id)
+    text = engine.brief(a.id, sid)
+    p = ROOT / "briefs" / f"{a.id}_{sid}.md"; p.parent.mkdir(exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    engine.record_brief(a.id, sid, text)
+    out(str(p))
+
+def c_start(a):
+    sid = a.stage or cur_stage(a.id)
+    engine.start(a.id, sid, lease_seconds=CFG["lease_seconds"])
+    out(f"{a.id} 开工：{STAGE[sid]['name']}")
+
+def c_done(a):
+    sid = a.stage or cur_stage(a.id)
+    hp = engine.done(a.id, sid, a.artifact, a.note or "")
+    out(f"{a.id} {STAGE[sid]['name']} 完成 → {hp.name}")
+
+def c_reject(a):
+    sid = a.stage or cur_stage(a.id); engine.reject(a.id, sid, a.reason)
+    out(f"{a.id} {STAGE[sid]['name']} 已退单：{a.reason}（交回团长改派）")
+
+def c_assign(a):
+    sid = a.stage or cur_stage(a.id); engine.assign(a.id, sid, a.to, a.reason)
+    out(f"{a.id} {STAGE[sid]['name']} 改派 → {ROLES[a.to]['name']}")
+
+def c_block(a):
+    sid = a.stage or cur_stage(a.id); engine.block(a.id, sid, a.reason, a.next or "leader")
+    out(f"{a.id} {STAGE[sid]['name']} 挂起：{a.reason}｜下一处理者 {a.next or 'leader'}")
+
+def c_unblock(a):
+    sid = a.stage or cur_stage(a.id); engine.unblock(a.id, sid)
+    out(f"{a.id} {STAGE[sid]['name']} 卡点已解除")
+
+def c_calls(a):
+    sid = a.stage or cur_stage(a.id); engine.add_calls(a.id, sid, a.n, a.note or "")
+    out(f"{a.id} {STAGE[sid]['name']} 付费调用 +{a.n}")
+
+def c_artifacts(a):
+    r = engine.status(a.id)
+    for x in r["artifacts"]:
+        out(f"{x['stage_id']:<10} {x['path']}  {x['size']}B  {x['sha256'][:12]}  {x['note'] or ''}")
+
+def c_events(a):
+    con = db.connect()
+    for e in db.rows(con, "SELECT * FROM events WHERE task_id=? ORDER BY id DESC LIMIT ?", (a.id, a.limit))[::-1]:
+        out(f"{e['ts']} {e['stage_id'] or '-':<10} {e['kind']:<12} {e['actor']:<8} {e['payload']}")
+    con.close()
+
+def _dispatch_one(tid, sid, executor=None):
+    """写任务书 → 开工 → 派执行器 → 收工。返回产出物路径。异常向上抛。"""
+    brief = engine.brief(tid, sid)
+    bp = ROOT / "briefs" / f"{tid}_{sid}.md"; bp.parent.mkdir(exist_ok=True); bp.write_text(brief, encoding="utf-8")
+    engine.record_brief(tid, sid, brief)
+    engine.start(tid, sid, lease_seconds=CFG["lease_seconds"])
+    t0 = time.time()
+    try:
+        art = adapters.dispatch(tid, sid, brief, executor)
+        engine.done(tid, sid, art, f"dispatch {round(time.time()-t0,1)}s")
+    except Blocked as e:
+        # 已开工但验收不过：挂起，别把阶段丢在 working
+        try:
+            st = [x for x in engine.status(tid)["stages"] if x["stage_id"] == sid][0]
+            if st["status"] == "working":
+                engine.block(tid, sid, str(e)[:300], "leader")
+        except Exception:
+            pass
+        raise
+    return art
+
+
+def c_dispatch(a):
+    sid = a.stage or cur_stage(a.id)
+    try:
+        art = _dispatch_one(a.id, sid, a.executor)
+    except Blocked as e:
+        out(f"BLOCKED: {e}")
+        sys.exit(2)
+    except adapters.HumanGate as e:
+        engine.block(a.id, sid, f"人工放行：{e}", e.next_handler)
+        out(f"{a.id} {STAGE[sid]['name']} 已挂起等人工放行 → {e}")
+        sys.exit(0)
+    except adapters.NotWired as e:
+        engine.block(a.id, sid, f"执行器未接通：{e}"[:300], "leader")
+        out(f"NOT_WIRED: {e}")
+        sys.exit(3)
+    except adapters.ExecFail as e:
+        engine.block(a.id, sid, f"执行失败：{e}"[:300], "leader")
+        out(f"{a.id} {STAGE[sid]['name']} 执行失败，已挂起：{e}")
+        sys.exit(4)
+    except Exception as e:
+        engine.block(a.id, sid, f"执行失败：{type(e).__name__}: {e}"[:300], "leader")
+        out(f"{a.id} {STAGE[sid]['name']} 执行失败，已挂起：{e}")
+        sys.exit(4)
+    out(f"{a.id} {STAGE[sid]['name']} 派活完成 → {art}")
+
+
+def c_approve(a):
+    f = engine.approve(a.id, a.stage, "human", a.note or "")
+    out(f"{a.id} {a.stage} 已人工放行 → {f.name}，下一步可 dispatch")
+
+
+def c_run(a):
+    """一条片子从当前阶段往前推，遇人工闸/卡点就停。"""
+    tid = a.id
+    for _ in range(a.max_steps):
+        r = engine.status(tid)
+        if r["task"]["status"] == "closed":
+            out(f"{tid} 全流程已完成")
+            return
+        cur = [s for s in r["stages"] if s["status"] in ("ready", "blocked", "working")]
+        if not cur:
+            out(f"{tid} 没有可推进的阶段")
+            return
+        s = cur[0]; sid = s["stage_id"]
+        if s["status"] == "blocked":
+            out(f"{tid} {STAGE[sid]['name']} 卡住：{s['blocked_reason']}（下一处理者 {s['blocked_next']}）")
+            return
+        try:
+            art = _dispatch_one(tid, sid, a.executor)
+            out(f"{tid} {STAGE[sid]['name']} ✓ → {art}")
+        except Blocked as e:
+            out(f"{tid} {STAGE[sid]['name']} 卡住：{e}")
+            return
+        except adapters.HumanGate as e:
+            engine.block(tid, sid, f"人工放行：{e}", e.next_handler)
+            out(f"{tid} {STAGE[sid]['name']} 到人工闸，已停：{e}")
+            return
+        except adapters.NotWired as e:
+            engine.block(tid, sid, f"执行器未接通：{e}"[:300], "leader")
+            out(f"NOT_WIRED: {e}")
+            return
+        except adapters.ExecFail as e:
+            engine.block(tid, sid, f"执行失败：{e}"[:300], "leader")
+            out(f"{tid} {STAGE[sid]['name']} 失败：{e}")
+            return
+        except Exception as e:
+            engine.block(tid, sid, f"执行失败：{type(e).__name__}: {e}"[:300], "leader")
+            out(f"{tid} {STAGE[sid]['name']} 失败：{e}")
+            return
+
+def c_daemon(a):
+    out(f"daemon 起：interval={a.interval}s auto_dispatch={CFG.get('auto_dispatch')} lease={CFG['lease_seconds']}s")
+    while True:
+        for tid, sid in engine.expire_leases():
+            print(f"[lease] {tid}/{sid} 心跳超时 → blocked")
+        if CFG.get("auto_dispatch"):
+            for r in engine.next_ready():
+                try:
+                    brief = engine.brief(r["task_id"], r["stage_id"])
+                    engine.start(r["task_id"], r["stage_id"], lease_seconds=CFG["lease_seconds"])
+                    art = adapters.dispatch(r["task_id"], r["stage_id"], brief)
+                    engine.done(r["task_id"], r["stage_id"], art, "auto")
+                    print(f"[auto] {r['task_id']}/{r['stage_id']} done → {art}")
+                except Exception as e:
+                    engine.block(r["task_id"], r["stage_id"], f"自动派活失败：{e}"[:300])
+                    print(f"[auto] {r['task_id']}/{r['stage_id']} blocked: {e}")
+        if a.once:
+            return
+        time.sleep(a.interval)
+
+p = argparse.ArgumentParser(prog="teamctl")
+sp = p.add_subparsers(dest="c", required=True)
+x = sp.add_parser("add"); x.add_argument("title"); x.add_argument("--batch", default="-"); x.add_argument("--account", default="-"); x.add_argument("--budget", type=int, default=60); x.set_defaults(f=c_add)
+sp.add_parser("next").set_defaults(f=c_next)
+x = sp.add_parser("status"); x.add_argument("id", nargs="?"); x.set_defaults(f=c_status)
+x = sp.add_parser("brief"); x.add_argument("id"); x.add_argument("--stage"); x.set_defaults(f=c_brief)
+x = sp.add_parser("start"); x.add_argument("id"); x.add_argument("--stage"); x.set_defaults(f=c_start)
+x = sp.add_parser("done"); x.add_argument("id"); x.add_argument("--artifact", required=True); x.add_argument("--note"); x.add_argument("--stage"); x.set_defaults(f=c_done)
+x = sp.add_parser("reject"); x.add_argument("id"); x.add_argument("--reason", required=True); x.add_argument("--stage"); x.set_defaults(f=c_reject)
+x = sp.add_parser("assign"); x.add_argument("id"); x.add_argument("--to", required=True); x.add_argument("--reason", required=True); x.add_argument("--stage"); x.set_defaults(f=c_assign)
+x = sp.add_parser("block"); x.add_argument("id"); x.add_argument("--reason", required=True); x.add_argument("--next"); x.add_argument("--stage"); x.set_defaults(f=c_block)
+x = sp.add_parser("unblock"); x.add_argument("id"); x.add_argument("--stage"); x.set_defaults(f=c_unblock)
+x = sp.add_parser("calls"); x.add_argument("id"); x.add_argument("--n", type=int, required=True); x.add_argument("--note"); x.add_argument("--stage"); x.set_defaults(f=c_calls)
+x = sp.add_parser("artifacts"); x.add_argument("id"); x.set_defaults(f=c_artifacts)
+x = sp.add_parser("events"); x.add_argument("id"); x.add_argument("--limit", type=int, default=20); x.set_defaults(f=c_events)
+x = sp.add_parser("dispatch"); x.add_argument("id"); x.add_argument("--stage"); x.add_argument("--executor"); x.set_defaults(f=c_dispatch)
+x = sp.add_parser("approve"); x.add_argument("id"); x.add_argument("stage"); x.add_argument("--note"); x.set_defaults(f=c_approve)
+x = sp.add_parser("run"); x.add_argument("id"); x.add_argument("--executor"); x.add_argument("--max-steps", type=int, default=12); x.set_defaults(f=c_run)
+x = sp.add_parser("daemon"); x.add_argument("--once", action="store_true"); x.add_argument("--interval", type=int, default=5); x.set_defaults(f=c_daemon)
+a = p.parse_args(); run(lambda: a.f(a))

@@ -1,0 +1,474 @@
+"""Main entry for the resident agent (started hidden by the launcher).
+
+1.2.5 (GPT review 1.2.4 item 8): every startup failure -- unwritable data area,
+bad config, missing runtime -- is caught at the TOP level, logged to the real
+log path, and turned into a NONZERO exit code with a Chinese remediation line.
+"Failed but exited 0" is forbidden.  The startup chain is also integrity-checked
+against MANIFEST.json (item 5).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import json
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+
+from .errors import EXIT_CONFIG, EXIT_OK, EXIT_SKIP, WinPortError
+from .instance import InstanceGuard
+from .logutil import get_logger
+from .paths import Layout, install_root
+from .settings import load_settings
+from .version import APP_NAME_DISPLAY, VERSION
+
+
+def _tray_rows(rows, environments):
+    """Tray menu rows grouped by environment (one instance per env)."""
+    if not environments:
+        return rows
+    labels = {env.env_id: env.label for env in environments}
+    out = []
+    for row in rows or []:
+        env_id = row.get("env_id")
+        label = labels.get(env_id, env_id or "")
+        out.append({**row,
+                    "platform_name": f"{label}\u00b7{row.get('platform_name', '')}"
+                    if label else row.get("platform_name", "")})
+    return out
+
+
+def _open_panel(url, logger):
+    """Tray menu action: open the local control panel in the default browser."""
+    if not url:
+        logger.info("panel not running; nothing to open")
+        return False
+    from .panel import open_panel
+    return open_panel(url)
+
+
+def _valid_panel_url(url) -> bool:
+    """True only for a real loopback control-panel URL.
+
+    1.2.5 round-3 (GPT review item 8): the readiness marker must not count on a
+    merely non-empty string (``httpnot-a-url``).  The control panel always binds
+    loopback, so we require an http(s) URL on 127.0.0.1 / ::1 / localhost with a
+    real port.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    if parts.hostname not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    return port is not None and 0 < port <= 65535
+
+
+def run(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="winport")
+    parser.add_argument("--data")
+    parser.add_argument("--once", action="store_true",
+                        help="one heartbeat round then exit (diagnostics)")
+    args = parser.parse_args(argv)
+
+    logger = None
+    log_path = "(\u65e5\u5fd7\u5c1a\u672a\u521b\u5efa)"
+    try:
+        layout = Layout(data=args.data).ensure()
+        logger = get_logger("winport.main", layout.logs)
+        log_path = str(Path(layout.logs) / "agent.out")
+        logger.info("%s v%s starting (data=%s)", APP_NAME_DISPLAY, VERSION,
+                    layout.data)
+        return _run_agent(layout, logger, args)
+    except WinPortError as exc:
+        _report_startup_failure(exc.message, exc.exit_code, log_path, logger)
+        return exc.exit_code
+    except Exception as exc:                       # never "failed but exited 0"
+        _report_startup_failure(f"{type(exc).__name__}: {exc}", EXIT_CONFIG,
+                                log_path, logger)
+        return EXIT_CONFIG
+
+
+def _report_startup_failure(message, code, log_path, logger) -> None:
+    text = (f"\u7a0b\u5e8f\u672a\u80fd\u542f\u52a8\uff1a{message}\n"
+            f"\u8865\u6551\u6b65\u9aa4\uff1a1) \u5173\u95ed\u672c\u7a97\u53e3\uff1b2) \u786e\u8ba4\u78c1\u76d8\u6709\u7a7a\u95f4\u3001\u6740\u6bd2\u8f6f\u4ef6\u6ca1\u6709\u9694\u79bb\u672c\u7a0b\u5e8f\uff1b"
+            f"3) \u53cc\u51fb\u300c\u6f2b\u5267\u53d1\u5e03\u52a9\u624b \u63a7\u5236\u9762\u677f\u300d\u91cd\u8bd5\uff1b\u82e5\u4ecd\u5931\u8d25\u8bf7\u628a\u8fd9\u4e00\u9875\u622a\u56fe\u53d1\u7ed9\u6211\u4eec\u3002\n"
+            f"\u771f\u5b9e\u65e5\u5fd7\uff1a{log_path}")
+    if logger is not None:
+        logger.error("startup failed (exit %s): %s", code, message)
+    print(text, file=sys.stderr)
+
+
+def _clear_ready_marker(layout, logger) -> None:
+    """1.2.5 round-11 (item 8-C): a stopping agent must not leave a readiness
+    marker that a later launcher could still read as "this instance is up"."""
+    path = Path(layout.run) / "agent-ready.json"
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError as exc:
+        logger.info("could not remove readiness marker: %s", exc)
+        try:
+            from .jsonio import write_json
+            write_json(path, {"pid": None, "ready": False, "panel_url": None,
+                              "panel_error": "agent stopped", "instance": None,
+                              "ts": time.time(), "version": VERSION})
+        except OSError:
+            pass
+
+
+def _write_agentpoll_marker(layout, logger, **fields) -> None:
+    """Best-effort status marker before/without a fully valid AgentConfig."""
+    try:
+        from .jsonio import write_json
+        payload = {"updated": time.time()}
+        payload.update(fields)
+        write_json(Path(layout.run) / "agentpoll-status.json", payload)
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        logger.warning("could not write agentpoll status: %s", exc)
+
+
+_CONTROL_WATCH_STARTED = False
+
+
+def _watch_control_binding(layout, logger):
+    """Wait for first-run activation to write control.json, then start polling."""
+    global _CONTROL_WATCH_STARTED
+    if _CONTROL_WATCH_STARTED:
+        return
+    _CONTROL_WATCH_STARTED = True
+
+    def loop():
+        for _ in range(6 * 60 * 24 * 7):
+            for candidate in (Path(layout.data) / "control.json",
+                              Path(layout.program) / "control.json"):
+                try:
+                    if candidate.is_file():
+                        poller = _start_agentpoll(layout, logger, allow_watch=False)
+                        if poller is not None:
+                            logger.info("binding picked up from %s", candidate)
+                            return
+                except Exception as exc:
+                    logger.warning("binding retry failed: %s", exc)
+            time.sleep(10)
+
+    threading.Thread(target=loop, name="binding-watch", daemon=True).start()
+
+
+def _start_agentpoll(layout, logger, allow_watch=True):
+    """Start the control-plane poller as part of the normal startup chain.
+
+    The poller is disabled when no CUSTOMER_TOKEN is configured (the legacy
+    single-customer install).  Automatic startup also requires an explicit
+    https CONTROL_URL; the old loopback default could hand the customer token
+    to any local process that won the port race.  Every disabled/startup/error
+    state is written to run/agentpoll-status.json so a silent non-running
+    poller is observable.
+    """
+    try:
+        from .agentpoll import AgentConfig, AgentPoller, write_status
+    except Exception as exc:  # noqa: BLE001 - import must not kill the panel
+        logger.error("agentpoll unavailable: %s", exc)
+        _write_agentpoll_marker(layout, logger, state="import_error",
+                                last_error=f"{type(exc).__name__}: {exc}")
+        return None
+    overlay = {}
+    for candidate in (Path(layout.data) / "control.json",
+                      Path(layout.program) / "control.json"):
+        try:
+            if candidate.is_file():
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                for key, env_name in (("control_url", "CONTROL_URL"),
+                                      ("customer_id", "CUSTOMER_ID"),
+                                      ("customer_token", "CUSTOMER_TOKEN")):
+                    value = str(data.get(key) or "").strip()
+                    if value:
+                        overlay[env_name] = value
+                if overlay:
+                    logger.info("agentpoll config loaded from %s", candidate)
+                break
+        except Exception as exc:  # noqa: BLE001 - bad file must not kill panel
+            logger.warning("control.json ignored (%s): %s", candidate, exc)
+    if not overlay.get("CONTROL_URL") and allow_watch:
+        _watch_control_binding(layout, logger)
+    merged_env = dict(os.environ)
+    merged_env.update(overlay)
+    try:
+        config = AgentConfig.from_env(
+            env=merged_env,
+            data_root=str(layout.data),
+            system_root=str(layout.system),
+            program_dir=str(layout.program),
+            cli_root=str(layout.program),
+            require_explicit_control_url=True,
+        )
+    except ValueError as exc:
+        logger.info("agentpoll disabled: %s", exc)
+        _write_agentpoll_marker(layout, logger, state="disabled",
+                                reason=str(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 - bad config is reported
+        logger.error("agentpoll config failed: %s", exc)
+        _write_agentpoll_marker(layout, logger, state="config_error",
+                                last_error=f"{type(exc).__name__}: {exc}")
+        return None
+    if not config.token:
+        write_status(config, state="disabled",
+                     reason="CUSTOMER_TOKEN is not configured")
+        logger.info("agentpoll disabled: CUSTOMER_TOKEN is not configured")
+        if allow_watch:
+            _watch_control_binding(layout, logger)
+        return None
+    try:
+        poller = AgentPoller(config, logger=logger)
+        poller.start()
+    except Exception as exc:  # noqa: BLE001 - panel still starts
+        logger.error("agentpoll startup failed: %s", exc)
+        write_status(config, state="startup_error",
+                     last_error=f"{type(exc).__name__}: {exc}")
+        return None
+    logger.info("agentpoll started customer=%s control=%s",
+                config.customer_id, config.control_url)
+    try:
+        from .remote_agent import start_remote_agent
+        start_remote_agent(config, logger=logger)
+    except Exception as exc:  # noqa: BLE001 - panel keeps working
+        logger.warning("remote agent unavailable: %s", exc)
+    return poller
+
+
+def _integrity_gate(layout, logger) -> None:
+    """Re-hash the startup chain; log loudly but never block \u6293\u6570."""
+    try:
+        from .integrity import verify_program
+        from .jsonio import write_json
+        from .paths import install_root
+        verdict = verify_program(install_root())
+        try:
+            write_json(Path(layout.run) / "integrity.json", verdict)
+        except OSError:
+            pass
+        if not verdict["ok"]:
+            from .logutil import audit
+            logger.error("integrity check FAILED: %s", verdict.get("reason"))
+            audit(layout.logs, "integrity_failed",
+                  modified=verdict.get("modified"),
+                  missing=verdict.get("missing"))
+        else:
+            logger.info("integrity check ok (%d files verified)",
+                        verdict.get("checked", 0))
+    except Exception as exc:                       # a check fault must not be fatal
+        logger.error("integrity check error (continuing): %s", exc)
+
+
+def _run_agent(layout, logger, args) -> int:
+    guard = InstanceGuard(layout, logger=logger)
+    # A crash/power cut during the atomic commit can leave mixed files.  Only
+    # touch them when no other agent owns this installation, and only before
+    # VERSION was committed by the previous transaction.
+    try:
+        if not guard.already_running():
+            from .updater import recover_interrupted
+            recovered = recover_interrupted(layout, install_root())
+            if recovered.get("recovered"):
+                logger.info("rolled back an interrupted update to %s",
+                            recovered.get("version"))
+    except Exception as exc:
+        logger.error("interrupted-update recovery failed: %s", exc)
+
+    _integrity_gate(layout, logger)
+
+    outcome = guard.start_or_focus()
+    if not outcome["started"]:
+        logger.info("already running: %s", outcome["reason"])
+        return EXIT_SKIP
+
+    from .daemon import Daemon, _default_downlink
+    from .platforms import load_registry, panel_binding
+    from .tray import TrayApp
+    settings = load_settings(layout.settings_file)
+    environments, channels = load_registry(layout)
+    logger.info("registry: %d environment(s), %d login slot(s)",
+                len(environments), len(channels))
+
+    # The approval service is a local helper, not the agent itself.  Start it
+    # with the agent and re-check every minute so a crashed helper comes back
+    # without a manual restart.  ensure_running() never raises.
+    approval_stop = threading.Event()
+
+    def _approval_service_loop():
+        from .approval_service import ensure_running
+        while not approval_stop.is_set():
+            try:
+                verdict = ensure_running(layout, settings, logger=logger)
+                if verdict.get("started"):
+                    logger.info("approval service started")
+                elif verdict.get("reason") not in ("already_running",):
+                    logger.info("approval service not running: %s",
+                                verdict.get("reason"))
+            except Exception as exc:
+                logger.error("approval service check failed: %s: %s",
+                             type(exc).__name__, exc)
+            approval_stop.wait(60)
+
+    threading.Thread(target=_approval_service_loop, daemon=True,
+                     name="approval-service").start()
+
+    # Multitenant control-plane poller.  It is part of the normal startup
+    # chain when CUSTOMER_TOKEN is configured; otherwise a disabled marker is
+    # written so the missing layer is visible instead of silently absent.
+    agentpoll = None
+    if not args.once:
+        agentpoll = _start_agentpoll(layout, logger)
+
+    # Local control panel: the customer's "status lights" screen + login entry.
+    # Loopback only.  1.2.5 (GPT review item 8): if it cannot bind we do NOT
+    # pretend the start succeeded -- a readiness marker with no panel_url used
+    # to make the launcher report success.  We record an honest not-ready marker
+    # and fail with a nonzero exit + a plain-language remedy.
+    panel_url = None
+    panel_error = None
+    panel_port = None
+    remote = None
+    if not args.once:
+        try:
+            from .remote_channel import RemoteChannel
+            remote = RemoteChannel(layout)
+        except Exception as exc:
+            logger.error("remote channel setup failed: %s", exc)
+    # 1.2.5 round-11 (GPT review item 8-C): a per-launch random instance token.
+    # It is written into run\agent-ready.json and echoed by the panel's /healthz
+    # endpoint, so the launcher proves the live loopback panel really belongs to
+    # the agent instance it started -- not a recycled pid or a stranger HTTP
+    # service that merely answers 200.
+    # run_panel.py supplies this per-spawn token; the VBS entries leave it
+    # unset and keep the historical random-token behaviour.
+    injected_token = os.environ.get("WINPORT_INSTANCE_TOKEN", "").strip().lower()
+    if len(injected_token) == 32 and all(ch in "0123456789abcdef"
+                                         for ch in injected_token):
+        instance_token = injected_token
+    else:
+        instance_token = os.urandom(16).hex()
+    try:
+        from .jsonio import read_json
+        from .panel import serve_in_thread
+        binding = panel_binding(read_json(layout.channels_file, default=None))
+        panel_port = binding["port"]
+        info = serve_in_thread(layout, channels, envs=environments,
+                               host=binding["host"], port=binding["port"],
+                               instance_token=instance_token,
+                               remote_channel=remote)
+        panel_url = info["url"]
+        logger.info("control panel: %s", panel_url)
+    except Exception as exc:
+        panel_error = f"{type(exc).__name__}: {exc}"
+        logger.error("control panel did not start: %s", panel_error)
+
+    # 1.2.5 (GPT review item 8): only a REAL loopback panel URL counts as ready
+    # (empty / null / "httpnot-a-url" all fail).
+    panel_ok = _valid_panel_url(panel_url)
+
+    daemon = Daemon(layout, downlink=_default_downlink(layout, logger),
+                    logger=logger, settings=settings, channels=channels)
+    tray = TrayApp(layout, on_check_now=daemon.run_round,
+                   on_open_panel=(lambda: _open_panel(panel_url, logger)),
+                   status_provider=lambda: _tray_rows(daemon.channel_rows,
+                                                      environments),
+                   logger=logger)
+    daemon.notify = tray.notify
+    tray.start()
+
+    # 1.2.5: explicit readiness marker -> the launcher / panel do a real, timed
+    # handshake instead of a blind sleep.  "ready" is TRUE only when the control
+    # panel actually came up; a failed panel is never reported as ready.
+    try:
+        from .jsonio import write_json
+        write_json(Path(layout.run) / "agent-ready.json",
+                   {"pid": os.getpid() if panel_ok else None,
+                    "ready": panel_ok, "panel_url": panel_url,
+                    "panel_error": panel_error,
+                    "instance": instance_token if panel_ok else None,
+                    "ts": time.time(), "version": VERSION,
+                    "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+        logger.info("readiness marker written (ready=%s panel=%s)",
+                    panel_ok, panel_url)
+    except OSError as exc:
+        logger.error("could not write readiness marker: %s", exc)
+
+    if not panel_ok:
+        raise WinPortError(
+            f"\u63a7\u5236\u9762\u677f\u672a\u80fd\u542f\u52a8\uff08{panel_error}\uff09\uff0c\u5df2\u6309\u5931\u8d25\u5904\u7406\uff08\u9000\u51fa\u7801\u975e 0\uff09\u3002"
+            f"\u8865\u6551\uff1a1) \u786e\u8ba4\u63a7\u5236\u9762\u677f\u4f7f\u7528\u7684\u672c\u673a\u670d\u52a1\u6ca1\u6709\u88ab\u522b\u7684\u7a0b\u5e8f\u5360\u7528\uff1b"
+            f"2) \u5173\u95ed\u5360\u7528\u7684\u7a0b\u5e8f\u540e\uff0c\u91cd\u65b0\u53cc\u51fb\u300c\u6f2b\u5267\u53d1\u5e03\u52a9\u624b \u63a7\u5236\u9762\u677f\u300d\uff1b"
+            f"3) \u82e5\u4ecd\u5931\u8d25\uff0c\u8bf7\u628a\u8fd9\u4e00\u9875\u622a\u56fe\u53d1\u7ed9\u6211\u4eec\u3002\u771f\u5b9e\u65e5\u5fd7\uff1a"
+            f"{Path(layout.logs) / 'agent.out'}",
+            exit_code=EXIT_CONFIG)
+
+    if remote is not None:
+        try:
+            remote.start()
+        except Exception as exc:
+            logger.error("remote channel startup failed: %s", exc)
+
+    # Incremental update loop.  It only acts while there is no in-flight
+    # publish and no publish lock, and it never runs in --once diagnostics.
+    update_loop = None
+    shutdown_event = threading.Event()
+    if not args.once and panel_ok:
+        try:
+            from .updater import UpdateLoop
+            update_loop = UpdateLoop(
+                layout,
+                health_url=panel_url.rstrip("/") + "/healthz",
+                shutdown=shutdown_event.set,
+                logger=logger,
+            )
+            update_loop.start()
+        except Exception as exc:
+            logger.error("update loop startup failed: %s", exc)
+
+    def _stop(*_):
+        approval_stop.set()
+        shutdown_event.set()
+        if update_loop is not None:
+            update_loop.stop()
+        if agentpoll is not None:
+            agentpoll.stop()
+        _clear_ready_marker(layout, logger)
+        tray.stop()
+        guard.release()
+        raise SystemExit(EXIT_OK)
+
+    try:
+        signal.signal(signal.SIGTERM, _stop)
+    except (ValueError, OSError):
+        pass
+
+    try:
+        return daemon.run_forever(max_rounds=1 if args.once else None,
+                                  stop_event=shutdown_event if not args.once else None)
+    finally:
+        approval_stop.set()
+        shutdown_event.set()
+        if update_loop is not None:
+            update_loop.stop()
+        if agentpoll is not None:
+            agentpoll.stop()
+        if remote is not None:
+            remote.stop()
+        _clear_ready_marker(layout, logger)
+        tray.stop()
+        guard.release()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

@@ -1,0 +1,14 @@
+[Unit]
+# > 执行者：codex
+Description=AI Video Factory Guangzhou to Singapore Execute API tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -i /home/ubuntu/.hermes/profiles/customer/home/.ssh/id_ed25519 -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -L 127.0.0.1:11889:127.0.0.1:1889 ubuntu@<SG_HOST>
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

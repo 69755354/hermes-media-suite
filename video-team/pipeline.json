@@ -1,0 +1,138 @@
+{
+ "stages": [
+  {
+   "id": "TOPIC",
+   "name": "选题",
+   "owner": "production",
+   "needs": [],
+   "artifact": "选题单",
+   "accept": [
+    "选题理由一句话说清为什么这条会有人看",
+    "目标人群、痛点、钩子各一行",
+    "不做文案、不做分镜"
+   ],
+   "paid": false
+  },
+  {
+   "id": "COPY",
+   "name": "文案",
+   "owner": "production",
+   "needs": [
+    "TOPIC"
+   ],
+   "artifact": "台词本",
+   "accept": [
+    "全长台词字数在 时长×5.5 的 ±10% 内",
+    "每句一口气念得完，不出现 27 字以上长句",
+    "含开场钩子、卖点、结尾引导"
+   ],
+   "paid": false
+  },
+  {
+   "id": "STORYBOARD",
+   "name": "分镜",
+   "owner": "production",
+   "needs": [
+    "COPY"
+   ],
+   "artifact": "分镜表",
+   "accept": [
+    "逐镜：序号、时长、景别运镜、画面、字幕、声音",
+    "各镜时长合计等于全片时长（±1 秒）",
+    "每镜台词字数 ≤ 该镜时长×5.5"
+   ],
+   "paid": false
+  },
+  {
+   "id": "MEDIA",
+   "name": "生成",
+   "owner": "production",
+   "needs": [
+    "STORYBOARD"
+   ],
+   "artifact": "素材/片段",
+   "accept": [
+    "按分镜逐镜生成，不缺镜、不重复镜",
+    "人物外观跨镜一致",
+    "单镜失败只重生成该镜，不重跑全片"
+   ],
+   "paid": true
+  },
+  {
+   "id": "COMPOSE",
+   "name": "合成",
+   "owner": "production",
+   "needs": [
+    "MEDIA"
+   ],
+   "artifact": "成片mp4",
+   "accept": [
+    "分辨率 720x1280、帧率与素材一致",
+    "字幕不压脸、不超安全区",
+    "音轨与画面时长对齐误差 < 100ms"
+   ],
+   "paid": false
+  },
+  {
+   "id": "COMPLIANCE",
+   "name": "合规",
+   "owner": "review",
+   "needs": [
+    "COMPOSE"
+   ],
+   "artifact": "合规结论",
+   "accept": [
+    "红线词 0 命中",
+    "风险提示按类型齐全",
+    "送客词 0 命中",
+    "结论只能是 通过/退回+原因"
+   ],
+   "paid": false
+  },
+  {
+   "id": "PUBLISH",
+   "name": "发布",
+   "owner": "publish",
+   "needs": [
+    "COMPLIANCE"
+   ],
+   "artifact": "发布回执",
+   "accept": [
+    "发布后回读作品列表，标题+时间命中才算成功",
+    "未回读命中一律报未确认，不许说已发",
+    "账号必须与任务指定一致"
+   ],
+   "paid": false
+  },
+  {
+   "id": "COLLECT",
+   "name": "取数",
+   "owner": "data",
+   "needs": [
+    "PUBLISH"
+   ],
+   "artifact": "数据表",
+   "accept": [
+    "两个号分别取数，缺号跳过并说明",
+    "20 列老板表格式",
+    "数字来自后台原始数据，不许估算"
+   ],
+   "paid": false
+  },
+  {
+   "id": "REVIEW",
+   "name": "复盘",
+   "owner": "data",
+   "needs": [
+    "COLLECT"
+   ],
+   "artifact": "复盘结论",
+   "accept": [
+    "给出通过/一般/淘汰三档结论",
+    "每条结论必须挂数据",
+    "提出下批选题建议"
+   ],
+   "paid": false
+  }
+ ]
+}

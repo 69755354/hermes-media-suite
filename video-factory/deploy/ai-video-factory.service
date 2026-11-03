@@ -1,0 +1,36 @@
+[Unit]
+# > 执行者：codex
+Description=AI Video Factory platform
+After=network-online.target ai-video-factory-execute-tunnel.service
+Wants=network-online.target
+Requires=ai-video-factory-execute-tunnel.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/ai-video-factory
+Environment=PAID_API_ENABLED=true
+Environment=XG_FACTORY_HOST=0.0.0.0
+Environment=XG_FACTORY_PORT=8090
+Environment=XG_FACTORY_WEB_WORKERS=4
+Environment=XG_FACTORY_MEDIA_CONCURRENCY=2
+Environment=XG_FACTORY_REQUEST_THREADS=48
+Environment=XG_FACTORY_REMOTE_POLL_BATCH=20
+Environment=XG_FACTORY_WORKER_LEASE_SECONDS=120
+Environment=XG_FACTORY_WORKER_RECONCILE_SECONDS=30
+Environment=XG_FACTORY_SQLITE_BUSY_TIMEOUT_MS=5000
+Environment=XG_FACTORY_ROOT_PATH=/factory
+Environment=XG_FACTORY_WORKFLOW_ROOT=/home/ubuntu/workflow
+Environment=XG_FACTORY_BILLING_BASE_URL=http://127.0.0.1:8080
+Environment=XG_FACTORY_BILLING_TIMEOUT=8
+Environment=XG_FACTORY_EXECUTION_BASE_URL=http://127.0.0.1:11889
+Environment=XG_FACTORY_REMOTE_CODEX_SCRIPT=/home/ubuntu/.hermes/scripts/codex_remote.sh
+LoadCredential=ops_password:/home/ubuntu/.config/ai-video-factory/credentials/ops_password.secret
+LoadCredential=session_secret:/home/ubuntu/.config/ai-video-factory/credentials/session_secret.secret
+LoadCredential=billing_admin_password:/home/ubuntu/.config/ai-video-factory/credentials/billing_admin_password.secret
+ExecStart=/bin/bash -c 'export XG_FACTORY_OPS_PASSWORD="$(<"$CREDENTIALS_DIRECTORY/ops_password")"; export XG_FACTORY_SESSION_SECRET="$(<"$CREDENTIALS_DIRECTORY/session_secret")"; export XG_FACTORY_BILLING_ADMIN_PASSWORD="$(<"$CREDENTIALS_DIRECTORY/billing_admin_password")"; exec /home/ubuntu/ai-video-factory/.venv/bin/python -m app'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

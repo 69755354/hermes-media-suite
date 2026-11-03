@@ -1,0 +1,25 @@
+## 六、验证
+
+- 发头条前过一遍：产出是否**无任何 AI 标注**（禁标 AI，平台声明由客户自选）？是否深度改写（非模板灌水）？原创度达标？敏感词已查？
+- 官方规则可能更新，政策类判断上线前搜最新公告核实
+- 去AI味六项修复 + 配图链三连根因（Commons HTTP/2 / ARK 18888 代理 / B 源 relevance 门槛）完整复盘见 `references/deai-illustration-fixes-20260821.md`
+- 去AI味相似度死锁 + 格式回炉路径去味阻断修复（needs_fallback 逻辑 / pipeline 去味失败处置）见 `references/deai-similarity-deadlock-fix-20260830.md`
+- 头条 Feed API 字段结构与频道映射（group_id/item_id 拼接、死频道 news_society/news_consumption → 替代映射）见 `references/toutiao-feed-api-202608.md`
+- 热榜源 2026-08-30 逐源复探、Python import 路径冲突修复、daily_auto.sh 串联脚本、当前卡点链路图见 `references/hotlist-sources-and-daily-auto-20260830.md`
+- 配图三处修复+Commons搜索词规律（移动版域名选择器/Commons PDF过滤/短搜索词比长词有效）见 `references/illustration-fixes-20260903.md`
+- Prompt字数指令冲突修复（模板中间全文字数淹没末尾分部额度/删三部分输出指令/末尾最高优先级）见 `references/prompt-wordcount-fix-20260903.md`
+- 副业赛道自动补选题方案（低水位检测/三层来源/三道门/状态机/主题矩阵72槽位）见 `_staging/topic_pool_auto_plan.md`
+- 选题来源=文档站而非平台爆款的坑（2026-09-04 用户点破：选题池 material 来自 book118/CSDN 等文档站，hot_value=null，无爆款基因）见 `references/topic-sourcing-pitfall-20260904.md`
+- 头条副业爆款标题4套路+14篇标题清单+代码修复3处+codex vs GLM写作对比+搜索工具可用性表（2026-09-04）见 `references/toutiao-hot-title-patterns-20260904.md`
+- codex写文章绕过产线被用户拒绝+AI味22.28根因（否定排比/三段式）+手动逐模块质检流程+COS presign方法见 `references/codex-bypass-pipeline-lesson-20260904.md`
+- 行业进化宏观视角写头条文章（角度纠正+真实素材清单+codex任务书模板）见 `references/industry-angle-writing-20260905.md`
+- 冷启动互动钩子规则（数据复盘根因+6个prompt文件改动+钩子结构与去AI味关系）见 `references/cold-start-engagement-hooks-20260905.md`
+- 头条图文配图通用标准（数量/尺寸/信息卡制作流程/AI副业稿4张图实操案例）见 `references/illustration-standards-20260905.md`
+- 文章配图生成工作流（按段落内容设计统一视觉体系/HTML+playwright截图/vision逐张检查/合集封面制作）见 `references/article-illustration-workflow-20260905.md`
+- 普通人用AI创业头条文章（真实收入数据+坑+规律+codex任务书要点）见 `references/ai-startup-article-20260905.md`
+- 头条赛道分析与写作质量拆解（账号数据可获取性/AI副业赛道流量低/竞品5点差距/赛道选择路线A-B）见 `references/toutiao-track-analysis-20260905.md`
+- 头条文章合集规划方法论（四层递进结构/合集命名/AI副业15篇定稿+封面/事实风险审计）见 `references/article-collection-planning-20260905.md`
+- 首篇中年职场文章完整生产工作流（选题池取题→素材搜索→pipeline跑→质检报告解读→手动修订→终稿验证→配图制作）见 `references/first-article-production-workflow-20260905.md`
+- 合集策划完整工作流（任务书打包/codex派活/封面生成/事实风险/角度去重）见 `references/collection-planning-workflow.md`
+- 规则体系梳理与月量规划（4层规则审计/6个冲突修复/30篇月发文计划/codex派活模式）见 `references/rule-system-audit-20260905.md`\n- 热点嫁接职场策略完整方法论（零粉号转向/创作罐头工具/嫁接标题公式/三步嫁接法/5个产线文件修改/首篇实测）见 `references/hot-topic-grafting-strategy-20260906.md`
+- 教程原版角色设定与投喂式prompt（写作两段式/6个技能角色/标题两段式/投喂纪律）见 `references/tutorial-role-prompts-20260907.md`

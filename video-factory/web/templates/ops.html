@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+<!-- > 执行者：codex -->
+{% block title %}内部审核台{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">内部审核台</p><h1>待办审核队列</h1></div><div class="flags"><span class="pill">付费调用：{{ '已开启' if paid_enabled else '关闭' }}</span><span class="pill">自动发布：{{ '已开启' if auto_publish else '关闭' }}</span></div></div>
+<div class="ops-layout"><section><h2>逐门审核</h2>{% for item in pending %}<article class="card review-row" data-project="{{ item.project_id }}" data-gate="{{ item.gate_id }}"><div><strong>{{ item.gate_id }}</strong><p class="muted">{{ item.project_id }} · {{ item.status }}</p></div><button class="ghost ops-check">先检查依据</button><button class="primary ops-approve" disabled>按当前依据放行</button><button class="ghost ops-advance">继续执行</button><pre class="ops-output">尚未检查。每个门必须独立检查、独立放行。</pre></article>{% else %}<div class="card empty">当前没有审核待办。</div>{% endfor %}
+<h2>新加坡生产</h2>{% for project in projects %}<article class="card remote-row" data-project="{{ project.id }}"><div><strong>{{ project.id }}</strong><p class="muted">{{ project.next_action }}</p></div><button class="primary remote-execute" {% if not paid_enabled %}disabled{% endif %}>逐单授权并发往新加坡</button><button class="ghost remote-status">查询回传状态</button><pre class="remote-output">按工作流通过 C1 与素材门后才能发起。</pre></article>{% endfor %}
+</section><aside><section class="card"><h2>执行边界</h2><p>付费总开关只读；每个项目仍须在这里逐单授权。</p><p>探店/剧情发往 Seedance Execute API；口播必须走婵镜，不会误投。</p><p>成片成功回传广州后才结算积分，失败不扣。</p></section><section class="card ops-health"><h2>每日巡检</h2><p>任务排队：{{ daily.queue.queued }}</p><p>孤儿任务：{{ daily.queue.orphaned }}</p><p>待审核：{{ daily.reviews.pending }}</p><p>磁盘使用：{{ daily.disk.used_pct }}%</p><p>备份：{{ daily.backup.status }}</p></section></aside></div>
+{% endblock %}{% block scripts %}<script>window.PAGE='ops';</script>{% endblock %}

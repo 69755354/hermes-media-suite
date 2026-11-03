@@ -1,0 +1,36 @@
+{
+  "leader": {
+    "name": "团长",
+    "who": "Hermes",
+    "duty": "只指挥不生产：接需求、拆任务、写任务书、派活、盯进度、验收产出物、卡门、汇报",
+    "executor": "dispatch_queue",
+    "produce": false
+  },
+  "production": {
+    "name": "视频组",
+    "who": "独立执行器（Codex/DS 壳 + 出片脚本）",
+    "duty": "选题、文案、分镜、生成、合成，交真实产出物",
+    "executor": "codex_ds.sh",
+    "produce": true
+  },
+  "publish": {
+    "name": "发布组",
+    "who": "发布助手（独立进程）",
+    "duty": "抖音发布、星图任务、回读确认",
+    "executor": "feishu_publish_bot",
+    "produce": true
+  },
+  "data": {
+    "name": "数据组",
+    "who": "发布助手 + 数据脚本",
+    "duty": "取数、20列老板表、星图消耗、复盘",
+    "executor": "feishu_publish_bot",
+    "produce": true
+  },
+  "review": {
+    "name": "审核组",
+    "who": "独立执行器（Codex，与视频组不同一次运行）",
+    "duty": "只做合规与验收判定，不改稿、不出片；有权打回",
+    "independent": true
+  }
+}

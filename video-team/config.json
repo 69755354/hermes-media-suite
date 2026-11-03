@@ -1,0 +1,54 @@
+{
+  "db": "state/team.db",
+  "workdir": "work",
+  "lease_seconds": 900,
+  "auto_dispatch": false,
+  "executors": {
+    "codex": {
+      "type": "codex",
+      "cmd": "/home/ubuntu/.hermes/scripts/codex_ds.sh",
+      "enabled": true,
+      "note": "视频组正文稿/分镜；需 DEEPSEEK_API_KEY，由壳脚本注入",
+      "timeout": 3600
+    },
+    "publish": {
+      "type": "publish_gate",
+      "enabled": true,
+      "note": "发布组：出待发工单，人工放行后执行并回读"
+    },
+    "data": {
+      "type": "data_tools",
+      "enabled": true,
+      "note": "数据组：tools/collect_report.py 产出20列作品表"
+    },
+    "stub": {
+      "type": "stub",
+      "enabled": true,
+      "note": "本地联调：只写占位产出物，不花钱"
+    },
+    "review": {
+      "type": "codex_review",
+      "cmd": "/home/ubuntu/.hermes/scripts/codex_ds.sh",
+      "enabled": true,
+      "timeout": 2400,
+      "note": "审核组：另起一次 Codex，只判合规/验收，不改稿"
+    },
+    "stub_ok": {
+      "type": "stub_ok",
+      "enabled": true,
+      "note": "联调用：只造能过闸的假产出物，不代表真跑通"
+    }
+  },
+  "stage_executor": {
+    "TOPIC": "codex",
+    "COPY": "codex",
+    "STORYBOARD": "codex",
+    "MEDIA": "codex",
+    "COMPOSE": "codex",
+    "COMPLIANCE": "review",
+    "PUBLISH": "publish",
+    "COLLECT": "data",
+    "REVIEW": "data"
+  },
+  "profile": "huolong_cartoon"
+}

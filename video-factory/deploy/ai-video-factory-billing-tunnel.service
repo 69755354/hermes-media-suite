@@ -1,0 +1,14 @@
+[Unit]
+# > 执行者：codex
+Description=AI Video Factory to Guangzhou Billing SSH tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -p 2222 -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:18080:127.0.0.1:8080 ubuntu@127.0.0.1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

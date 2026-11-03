@@ -1,0 +1,14 @@
+[Unit]
+Description=Video Team scheduler (Hermes leader / 3 groups)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/workflow/projects/video_team
+ExecStart=/usr/bin/python3 /home/ubuntu/workflow/projects/video_team/teamctl daemon --interval 5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

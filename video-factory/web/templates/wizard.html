@@ -1,0 +1,157 @@
+{% extends "base.html" %}{% block title %}填写内容需求{% endblock %}{% block content %}
+<!-- > 执行者：codex -->
+<section class="wizard card" id="wizard">
+  <div class="steps">
+    <span class="active">1 内容类型</span>
+    <span>2 商家与内容</span>
+    <span>3 素材与授权</span>
+  </div>
+  <form id="project-form">
+    <div class="wizard-step active" data-step="1">
+      <p class="eyebrow">第一问</p>
+      <h1>你想做探店视频、剧情类还是口播视频？</h1>
+      <div class="choice-row content-type-choices">
+        <label><input type="radio" name="content_type" value="store_visit" required> 探店视频</label>
+        <label><input type="radio" name="content_type" value="drama" required> 剧情视频</label>
+        <label><input type="radio" name="content_type" value="oral" required> 口播视频</label>
+      </div>
+      <p class="notice">选好后，我们只收这类视频真正需要的资料。</p>
+    </div>
+
+    <div class="wizard-step" data-step="2">
+      <p class="eyebrow">商家与内容</p>
+      <h1>填写这次制作要用的信息</h1>
+      <div class="form-grid">
+        <label>行业
+          <select name="industry_path">
+            <optgroup label="餐饮">
+              <option value="catering/hotpot" data-signature-label="招牌锅底/菜品" data-signature-placeholder="例如：手工牛油锅底、鲜切黄牛肉">火锅</option>
+              <option value="catering/barbecue" data-signature-label="招牌烤品" data-signature-placeholder="例如：现切羊肉串、炭烤生蚝">烧烤</option>
+              <option value="catering/fast_food" data-signature-label="招牌单品" data-signature-placeholder="例如：现炒盖码饭、手工馄饨">快餐/小吃</option>
+              <option value="catering/cafe_tea" data-signature-label="招牌饮品/甜点" data-signature-placeholder="例如：桂花拿铁、鲜果茶">咖啡茶饮</option>
+              <option value="catering/restaurant" data-signature-label="招牌菜" data-signature-placeholder="例如：砂锅焗鱼头、招牌烧鹅">正餐</option>
+              <option value="catering/bakery" data-signature-label="招牌烘焙产品" data-signature-placeholder="例如：现烤可颂、生日蛋糕">烘焙</option>
+            </optgroup>
+            <optgroup label="其他行业">
+              <option value="medical_aesthetics/store" data-signature-label="主推项目/服务" data-signature-placeholder="只写真实项目名称，不填写疗效承诺">医疗美容</option>
+              <option value="other/local_business" data-signature-label="招牌产品/服务" data-signature-placeholder="写这次最想让顾客记住的一个产品或服务">其他本地生活/零售服务</option>
+            </optgroup>
+          </select>
+        </label>
+        <label>店名/账号名
+          <input name="business_name" placeholder="填写顾客实际看到的名称" required>
+        </label>
+        <label>地址
+          <input name="address" placeholder="城市、区县、街道和门牌号" required>
+        </label>
+        <label>联系方式
+          <input name="contact" placeholder="手机号或微信号，仅用于项目沟通" required>
+        </label>
+      </div>
+
+      <section data-content-branch="store_visit" hidden>
+        <div class="form-grid">
+          <label><span id="signature-label">招牌锅底/菜品</span>
+            <input name="signature_item" id="signature-item" placeholder="例如：手工牛油锅底、鲜切黄牛肉" data-branch-required>
+          </label>
+          <label>客单价（元）
+            <input name="average_spend" type="number" min="0" step="0.01" placeholder="例如：100" data-branch-required>
+          </label>
+          <label>主推套餐/项目名
+            <input name="offer_name" placeholder="例如：双人套餐" data-branch-required>
+          </label>
+          <label>套餐/项目内容
+            <input name="offer_spec" placeholder="写清包含什么" data-branch-required>
+          </label>
+          <label>套餐/项目价格（元）
+            <input name="offer_amount" type="number" min="0" step="0.01" placeholder="例如：199" data-branch-required>
+          </label>
+        </div>
+      </section>
+
+      <section data-content-branch="drama" hidden>
+        <div class="form-grid">
+          <label>剧本方向
+            <select name="drama_direction" data-branch-required>
+              <option value="single">单人剧情</option>
+              <option value="dual">双人对手戏</option>
+            </select>
+          </label>
+          <label>人物数量
+            <input name="character_count" type="number" min="1" max="2" value="1" data-branch-required>
+          </label>
+        </div>
+      </section>
+
+      <section data-content-branch="oral" hidden>
+        <div class="form-grid">
+          <label>口播内容方向（选填）
+            <input name="oral_content_direction" placeholder="例如：店主故事、知识讲解、产品介绍">
+          </label>
+          <label>参考风格（选填）
+            <input name="reference_style" placeholder="例如：真诚自然、专业克制">
+          </label>
+        </div>
+      </section>
+
+      <label>核心卖点
+        <textarea name="selling_points" rows="4" placeholder="每行一个，只写真实、能拍出来或讲清楚的特点" required></textarea>
+      </label>
+      <div id="redline-result" class="notice">尚未发现确定性风险词</div>
+      <div class="choice-row">
+        <label><input type="radio" name="show_process" value="full" checked> 看专业过程</label>
+        <label><input type="radio" name="show_process" value="result_only"> 只看进度与结果</label>
+      </div>
+    </div>
+
+    <div class="wizard-step" data-step="3">
+      <p class="eyebrow">真实素材与内容授权</p>
+      <h1 id="assets-title">按视频类型上传素材</h1>
+      <section data-content-branch="store_visit" hidden>
+        <label class="upload-box">门头照（必传）
+          <input name="storefront_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple data-branch-required>
+          <small>能看清店名和入口。</small>
+        </label>
+        <label class="upload-box">产品/菜单（必传）
+          <input name="product_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple data-branch-required>
+          <small>上传招牌产品、菜品或菜单实拍。</small>
+        </label>
+        <label class="upload-box">店内环境（选传）
+          <input name="interior_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+        </label>
+        <label class="upload-box">价格素材（选传）
+          <input name="price_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+        </label>
+      </section>
+      <section data-content-branch="drama" hidden>
+        <label class="upload-box">场景参考（选传）
+          <input name="drama_scene_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+          <small>上传希望剧情发生的环境参考。</small>
+        </label>
+        <label class="upload-box">人物参考（选传）
+          <input name="character_assets" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+          <small>上传已授权的人物形象或角色参考。</small>
+        </label>
+      </section>
+      <section data-content-branch="oral" hidden>
+        <label class="upload-box">出镜人形象（必传）
+          <input name="presenter_assets" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" multiple data-branch-required>
+          <small>可上传正面清晰照片，或稳定自然的出镜参考视频。</small>
+        </label>
+      </section>
+      <div class="auth-list">
+        <label><input type="checkbox" name="content_authorization"> 我同意你们拍摄，并使用我上传的素材制作本项目短视频</label>
+        <label><input type="checkbox" name="portrait_rights"> 素材如含人物，我已取得相关人物的内容使用授权</label>
+      </div>
+      <p class="notice">这里只确认内容制作与素材使用授权，不收集营业执照或经营资质材料。</p>
+    </div>
+
+    <div class="wizard-actions">
+      <button type="button" class="ghost" id="prev-step">上一步</button>
+      <button type="button" class="primary" id="next-step">下一步</button>
+      <button type="submit" class="primary hidden" id="submit-project">提交并开始</button>
+    </div>
+    <p id="project-error" class="error"></p>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,71 @@
+# 课次包模板（lesson pack）— 小鹿教学模式运行时加载
+
+每个 yaml 定义「当前课教什么」，总安全策略定义「永远不能做什么」，两者不能互相覆盖。
+生成规范见《小鹿教学模式落地设计》§7.6；14 课实际产物在 `workflow/projects/ai-teacher-bot/lesson_packs/lesson_*.yaml`。
+
+```yaml
+lesson_id: "1-1"
+title: "你早就在用 AI 了"
+phase: 1
+system_stages: [PROJECT_CHARTER, BUSINESS_DIAGNOSIS]
+allowed_bands: [low, middle, high]
+entry_artifact: null
+exit_artifact: ai_list
+steps:
+  - id: teacher_opening
+    role: teacher
+    description: "说明本课要找出身边的 AI，并念出五个已审核场景。"
+  - id: ai_scene_quiz
+    role: xiaolu
+    description: "逐题让同学判断五个场景是否使用了 AI。"
+  - id: parrot_metaphor
+    role: demo
+    description: "用‘读过很多书、很会接话的鹦鹉’解释 AI。"
+  - id: demo_virtual_examples
+    role: demo
+    description: "展示输入法、相册分类、地图路线三个虚构且去隐私的例子。"
+  - id: student_list_devices
+    role: student
+    description: "提交至少三个日常设备或功能，并说明各自用途；低档可由老师代输。"
+  - id: student_explain_ai
+    role: student
+    description: "中高档说明判断依据；高档补充人决定什么、AI 帮什么。"
+  - id: rubric_check
+    role: verify
+    description: "检查至少三项、用途完整、无隐私，并输出实验卡。"
+capabilities:
+  search: deny
+  image_generation: deny
+  video_generation: deny
+  audio_generation: deny
+  editing: deny
+safety:
+  pii: block_and_redact
+  real_person_claims: deny
+  content_policy: "只讨论普通设备和功能；不得收集家庭地址、设备账号或真实开锁信息。"
+  privacy_checks:
+    - "设备描述去品牌账号化"
+    - "不访问学生设备"
+    - "不记录家庭位置与开锁信息"
+fallback:
+  no_device_or_network: "使用老师念题和纸质 AI 清单完成口述与记录。"
+prompt_brief: "对学生称‘同学’，对教师控制消息称‘老师’。用孩子听得懂的话，一次只推进一个动作；先让同学回答，再给提示，最后才演示。只检查清单是否完整和安全，不替同学判断或代写。"
+```
+
+## 字段约定
+
+- `lesson_id` / `title` / `phase` / `system_stages`：课次基本信息 + 课程表对应系统环节
+- `allowed_bands`：low/middle/high（低/中/高档），可加载的分档
+- `entry_artifact` / `exit_artifact`：本课所需入口产物 / 交给后续课的主要产物（交接物链：ai_list → first_ai_image → three_version_evolution → storyboard → first_media_work → work_v1_and_pipeline_table → system_diagram）
+- `steps`：按交互先后排列；每步含唯一 `id`、执行 `role`、中文 `description`。role 固定为：teacher（老师动作）/ xiaolu（小鹿带领）/ student（学生任务）/ demo（小鹿演示）/ verify（自动验收 rubric_check）
+- `capabilities`：本课能力白名单——`deny`（不调用）/ `teacher_approved_only`（老师批准+额度三查）/ `demo_only`（仅演示，课前缓存）。任何未列能力不得调用
+- `safety`：pii（block_and_redact）/ real_person_claims（deny）/ content_policy / privacy_checks；不能覆盖教学模式总安全策略
+- `fallback`：能力、额度或素材不可用时的降级路径（无生成券→文字预览卡、搜索失败→老师来源卡、生视频→老师预生成演示、网络/设备不可用→纸卡模拟）
+- `prompt_brief`：运行时大模型的课内带领口径（称呼"同学/老师"、一次只推一个动作、先学生后提示再示范）
+
+## 生成要点（2026-08-21 codex 实测）
+
+- 任务书：TASK_TYPE=文案，DATA_SOURCE 指落地设计 md，输入用项目内课程表副本（容器读不到项目外路径）
+- 产出自检：每个 yaml 能被 `yaml.safe_load` 解析、lesson_id 唯一、每课步骤 id 无重复、必填字段/能力值/角色值合法
+- 生图课（3-x）image_generation=teacher_approved_only + fallback 无券给文字预览卡；生视频课（4-x）video_generation=demo_only（课堂不现场调用，按秒计费最贵）
+- 1-1/1-2/1-3 认知安全课全能力 deny（零付费）

@@ -1,0 +1,1 @@
+# video-team 主体使用标准库；如需看板 Web 依赖请按 panel/ 内说明安装
