@@ -1,0 +1,268 @@
+# > 执行者：codex｜对应架构 v2.0 §5.2、§7.5、§10.5、§17.2（CR-10）
+
+meta:
+  contract_id: CLIENT_VIEW_CATALOG
+  version: "1.0.0"
+  status: frozen
+  frozen_at: "2026-08-16"
+  source_architecture: outputs/客户运营工作流可视化平台_架构v2_20260816.md
+  source_sections: ["5.2", "7.5", "10.5", "17.2"]
+  id_pattern: '^D_[A-Z0-9_]+$'
+  source_id_pattern: '^A_[A-Z0-9_]+$'
+  required_view_keys:
+    - sources
+    - renderer
+    - redaction
+    - version
+    - required_fields
+    - download_policy
+  export_rules:
+    render_mode: whitelist_rerender
+    copy_and_redact_forbidden: true
+    export_independent_of_show_process: true
+    external_forbidden_scan_after_render: true
+    expose_server_path: false
+
+redaction_policies:
+  strict_external:
+    allow_only_required_fields: true
+    strip_executor_markers: true
+    forbidden_patterns:
+      - '/home/ubuntu/'
+      - '/tmp/projects/'
+      - 'MEDIA:'
+      - 'T-[A-Z0-9_-]+'
+      - '节点[0-9]+'
+      - '(?i)codex|claude|deepseek'
+      - '执行者'
+    on_match: BLOCKED
+
+download_policies:
+  none:
+    mode: none
+  inline_html:
+    mode: inline
+    content_types: [text/html]
+  signed_binary:
+    mode: signed_token
+    token_ttl_seconds: 900
+    allow_range: true
+    formal_only: true
+    path_in_response: false
+  signed_bundle:
+    mode: signed_token
+    token_ttl_seconds: 900
+    allow_range: true
+    pre_generated: true
+    formal_only: true
+    path_in_response: false
+
+views:
+  D_START_EXECUTION_GUIDE:
+    stage: S-A
+    sources: [A_PROJECT_CHARTER, A_STORE_FACTS, A_AUTHORIZATION_REGISTER]
+    renderer: templates/client_views/start_execution_guide.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [项目名称, 门店名称, 服务范围, 当前阶段, 待办事项]
+    download_policy: inline_html
+
+  D_START_ASSET_LIST:
+    stage: S-A
+    sources: [A_STORE_FACTS, A_ASSET_REGISTER, A_RIGHTS_REGISTER]
+    renderer: templates/client_views/start_asset_list.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [门店名称, 素材清单, 素材类型, 权属状态, 待补素材]
+    download_policy: inline_html
+
+  D_START_BUSINESS_DIAGNOSIS:
+    stage: S-B
+    sources: [A_BUSINESS_DIAGNOSIS, A_BASELINE_LEDGER, A_CAPACITY_PROFILE, A_DATA_GAPS]
+    renderer: templates/client_views/start_business_diagnosis.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [经营现状, 关键断点, 产能约束, 数据缺口]
+    download_policy: inline_html
+
+  D_START_AUDIENCE:
+    stage: S-B
+    sources: [A_AUDIENCE_PROFILE]
+    renderer: templates/client_views/start_audience.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [目标顾客, 典型场景, 核心需求]
+    download_policy: inline_html
+
+  D_START_COMPETITION:
+    stage: S-B
+    sources: [A_LOCAL_COMPETITOR_SCAN, A_CONTENT_BENCHMARKS]
+    renderer: templates/client_views/start_competition.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [商圈范围, 同行样本, 内容规律]
+    download_policy: inline_html
+
+  D_START_OFFER_PATH:
+    stage: S-B
+    sources: [A_OFFER_PORTFOLIO, A_UNIT_ECONOMICS, A_OFFER_PATH, A_CAPACITY_GUARD]
+    renderer: templates/client_views/start_offer_path.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [主推项目, 适用顾客, 预约路径, 产能限制, 价格口径]
+    download_policy: inline_html
+
+  D_START_GROWTH_PLAYBOOK:
+    stage: S-B
+    sources: [A_GROWTH_PLAYBOOK, A_FUNNEL_TARGETS, A_BUDGET_GUARDRAIL, A_RISK_PLAN]
+    renderer: templates/client_views/start_growth_playbook.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [平台组合, 内容配比, 阶段节奏, 投流策略, 变现方式]
+    download_policy: inline_html
+
+  D_START_INFRA_CHECKLIST:
+    stage: S-B
+    sources: [A_ACCOUNT_BASELINE, A_POI_CHECK, A_BOOKING_ENTRY_CHECK, A_TRACKING_SPEC, A_DUTY_ROSTER]
+    renderer: templates/client_views/start_infra_checklist.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [账号状态, 门店位置状态, 预约入口状态, 数据追踪状态, 待办清单]
+    download_policy: inline_html
+
+  D_CYCLE_CALENDAR:
+    stage: S-B
+    sources: [A_CONTENT_MATRIX, A_CONTENT_CALENDAR, A_MATERIAL_PLAN]
+    renderer: templates/client_views/cycle_calendar.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [周期, 内容主题, 内容格式, 计划日期, 素材需求]
+    download_policy: inline_html
+
+  D_CYCLE_TOPICS:
+    stage: S-C
+    sources: [A_TOPIC_FINAL, A_TOPIC_EXPERIMENTS, A_EXTERNAL_CALIBRATION]
+    renderer: templates/client_views/cycle_topics.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [最终选题, 目标顾客, 内容钩子, 选择依据]
+    download_policy: inline_html
+
+  D_CYCLE_COPY_SET:
+    stage: S-C
+    sources: [A_COPY_VERSION_1, A_COPY_VERSION_2, A_COPY_VERSION_3, A_COPY_FINAL, A_COPY_REVIEW]
+    renderer: templates/client_views/cycle_copy_set.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [版本列表, 最终台词, 事实口径, 评审结论]
+    download_policy: inline_html
+
+  D_CYCLE_PLATFORM_COPY:
+    stage: S-C
+    sources: [A_PLATFORM_COPY_PACK, A_COPY_FINAL]
+    renderer: templates/client_views/cycle_platform_copy.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [平台, 标题, 正文, 发布说明]
+    download_policy: inline_html
+
+  D_CYCLE_VISUAL_PLAN:
+    stage: S-C
+    sources: [A_STORYBOARD, A_VISUAL_BIBLE, A_SCENE_ASSET_MAP, A_SHOT_REQUIREMENTS]
+    renderer: templates/client_views/cycle_visual_plan.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [镜次, 台词, 画面, 情绪, 时长, 素材需求]
+    download_policy: inline_html
+
+  D_CYCLE_MEDIA:
+    stage: S-D
+    applies_to: [VIDEO_SHORT, IMAGE_POST]
+    sources: [A_VIDEO_MASTER, A_IMAGE_SET, A_COVER, A_SUBTITLES, A_TECH_QC]
+    source_selection: branch_subset
+    renderer: templates/client_views/cycle_media.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [内容格式, 主交付件, 封面, 技术质检状态]
+    download_policy: signed_binary
+
+  D_CYCLE_PUBLISH_PACK:
+    stage: S-E
+    sources: [A_PUBLISH_PACKAGE, A_MEDIA_DELIVERY, A_TRACE_CODE_SET]
+    renderer: templates/client_views/cycle_publish_pack.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [交付清单, 文件名称, 文件大小, 校验摘要, 下载入口]
+    download_policy: signed_bundle
+
+  D_CYCLE_PUBLISH_GUIDE:
+    stage: S-E
+    sources: [A_PUBLISH_GUIDE]
+    renderer: templates/client_views/cycle_publish_guide.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [发布平台, 发布步骤, AI标识要求, 注意事项]
+    download_policy: inline_html
+
+  D_CYCLE_RESPONSE_GUIDE:
+    stage: S-E
+    sources: [A_RESPONSE_PLAYBOOK]
+    renderer: templates/client_views/cycle_response_guide.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [场景, 建议回复, 升级条件, 禁止表达]
+    download_policy: inline_html
+
+  D_OPS_PUBLISH_LOG:
+    stage: S-F
+    sources: [A_PUBLISH_LOG, A_ONLINE_EVIDENCE, A_PUBLISH_EXCEPTION]
+    renderer: templates/client_views/ops_publish_log.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [平台, 发布时间, 发布状态, 异常状态]
+    download_policy: inline_html
+
+  D_OPS_FUNNEL_LEDGER:
+    stage: S-F
+    sources: [A_LEAD_LEDGER, A_LEAD_CLASSIFICATION, A_INTERACTION_LOG]
+    renderer: templates/client_views/ops_funnel_ledger.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [周期, 线索阶段, 数量, 来源, 口径说明]
+    download_policy: inline_html
+
+  D_OPS_WEEKLY_REVIEW:
+    stage: S-F
+    sources: [A_WEEKLY_REVIEW, A_ATTRIBUTION_REPORT, A_PROBLEM_OWNERSHIP]
+    renderer: templates/client_views/ops_weekly_review.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [复盘周期, 结果摘要, 归因, 问题归属]
+    download_policy: inline_html
+
+  D_OPS_NEXT_WEEK_ACTIONS:
+    stage: S-F
+    sources: [A_NEXT_WEEK_ACTIONS, A_EXPERIMENT_BACKLOG]
+    renderer: templates/client_views/ops_next_week_actions.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [行动, 负责人, 截止时间, 验证指标]
+    download_policy: inline_html
+
+  D_OPS_MONTHLY_REPORT:
+    stage: S-F
+    sources: [A_MONTHLY_OPERATING_REPORT, A_MONTHLY_COST_REPORT]
+    renderer: templates/client_views/ops_monthly_report.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [报告周期, 经营结果, 内容结果, 成本摘要, 风险]
+    download_policy: inline_html
+
+  D_OPS_NEXT_CYCLE_PLAN:
+    stage: S-F
+    sources: [A_NEXT_CYCLE_PLAN, A_BUDGET_REVISION, A_RENEWAL_SCOPE]
+    renderer: templates/client_views/ops_next_cycle_plan.html.j2
+    redaction: strict_external
+    version: 1
+    required_fields: [下周期目标, 行动计划, 预算调整, 服务范围]
+    download_policy: inline_html

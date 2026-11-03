@@ -12,3 +12,7 @@ evidence/
 run/
 backups/
 .DS_Store
+**/data/token_cache.json
+**/cookies*.json
+video-factory/runtime/
+video-team/work/

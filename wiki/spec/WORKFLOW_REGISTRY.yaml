@@ -1,0 +1,271 @@
+# WORKFLOW_REGISTRY.yaml — 工作流单一事实源（2026-08-10 语义ID化）
+# 节点数字只做排序；依赖/文件/门禁/日志一律用语义ID
+# 依据：wiki/spec/工作流按交付物重构方案.md
+
+meta:
+  version: '1.0'
+  update_date: '2026-08-10'
+  note: 语义ID注册表。旧数字编号只读兼容，新项目一律走语义ID。
+
+nodes:
+  PROJECT_CHARTER:
+    display_order: 0
+    name: 合作立项与资料建档
+    produces: [A_PROJECT_CHARTER, A_STORE_FACTS, A_ASSET_REGISTER, A_RIGHTS_REGISTER, A_AUTHORIZATION_REGISTER]
+    requires: []
+    exit_gate: G_PROJECT_AUTHORIZED
+  BUSINESS_DIAGNOSIS:
+    display_order: 1
+    name: 门店经营诊断
+    produces: [A_BUSINESS_DIAGNOSIS, A_BASELINE_LEDGER, A_CAPACITY_PROFILE, A_DATA_GAPS]
+    requires: [A_PROJECT_CHARTER, A_STORE_FACTS, A_AUTHORIZATION_REGISTER]
+    exit_gate: G_BUSINESS_BASELINE_READY
+  MARKET_INSIGHT:
+    display_order: 2
+    name: 顾客、商圈、竞争与内容洞察
+    produces: [A_AUDIENCE_PROFILE, A_LOCAL_COMPETITOR_SCAN, A_CONTENT_BENCHMARKS, A_MATERIAL_BLOCKLIST]
+    requires: [A_BUSINESS_DIAGNOSIS, A_STORE_FACTS]
+  OFFER_PATH:
+    display_order: 3
+    name: 主推项目与预约路径设计
+    produces: [A_OFFER_PORTFOLIO, A_UNIT_ECONOMICS, A_OFFER_PATH, A_CAPACITY_GUARD]
+    requires: [A_BUSINESS_DIAGNOSIS, A_AUDIENCE_PROFILE]
+    exit_gate: G_OFFER_VIABLE
+  GROWTH_STRATEGY:
+    display_order: 4
+    name: 平台选择与整体打法
+    produces: [A_GROWTH_PLAYBOOK, A_FUNNEL_TARGETS, A_BUDGET_GUARDRAIL, A_RISK_PLAN]
+    requires: [A_BUSINESS_DIAGNOSIS, A_AUDIENCE_PROFILE, A_LOCAL_COMPETITOR_SCAN, A_CONTENT_BENCHMARKS, A_OFFER_PATH]
+    exit_gate: G_STRATEGY_BY_CODEX
+  OPERATING_INFRA:
+    display_order: 5
+    name: 账号、门店位置、预约与数据基建
+    produces: [A_ACCOUNT_BASELINE, A_POI_CHECK, A_BOOKING_ENTRY_CHECK, A_TRACKING_SPEC, A_DUTY_ROSTER]
+    requires: [A_GROWTH_PLAYBOOK, A_OFFER_PATH]
+    exit_gate: G_INFRA_READY_FOR_PUBLISH
+  CONTENT_CALENDAR:
+    display_order: 6
+    name: 周月内容矩阵与排期
+    produces: [A_CONTENT_MATRIX, A_CONTENT_CALENDAR, A_MATERIAL_PLAN, A_CYCLE_BUDGET]
+    requires: [A_GROWTH_PLAYBOOK, A_OFFER_PATH, A_TRACKING_SPEC]
+    exit_gate: G_CONTENT_PLAN_READY
+  TOPIC_EXPERIMENT:
+    display_order: 7
+    name: 选题实验
+    produces: [A_TOPIC_CANDIDATES, A_TOPIC_EXPERIMENTS, A_TOPIC_FINAL, A_EXTERNAL_CALIBRATION]
+    requires: [A_CONTENT_CALENDAR, A_GROWTH_PLAYBOOK, A_AUDIENCE_PROFILE, A_LOCAL_COMPETITOR_SCAN, A_CONTENT_BENCHMARKS, A_MATERIAL_BLOCKLIST]
+    exit_gate: G_TOPIC_READY
+  COPY_PACKAGE:
+    display_order: 8
+    name: 多版文案与平台版本
+    produces: [A_COPY_VERSION_1, A_COPY_VERSION_2, A_COPY_VERSION_3, A_COPY_FINAL, A_PLATFORM_COPY_PACK, A_COPY_REVIEW, A_COPY_APPROVAL]
+    requires: [A_TOPIC_FINAL, A_OFFER_PATH, A_GROWTH_PLAYBOOK, A_CONTENT_CALENDAR, A_MATERIAL_BLOCKLIST]
+    exit_gate: G_COPY_READY
+  CREATIVE_BLUEPRINT:
+    display_order: 9
+    name: 分镜、画面与视觉基线
+    produces: [A_STORYBOARD, A_VISUAL_BIBLE, A_VOICE_BASELINE, A_SCENE_ASSET_MAP, A_SHOT_REQUIREMENTS]
+    requires: [A_COPY_FINAL, A_ASSET_REGISTER, A_RIGHTS_REGISTER]
+    exit_gate: G_CREATIVE_READY
+    validation:
+      target_total_duration_seconds: null   # 项目级时长由 PROJECT_CHARTER 指定；null=不检查（2026-08-20 架构修复 P0.2）
+      total_duration_tolerance_seconds: 1
+      max_shot_duration_seconds: 15
+      talking_head_max_shot_duration_seconds: 15
+  MEDIA_PREP:
+    display_order: 10
+    name: 素材与生成准备
+    produces: [A_ASSET_MANIFEST, A_GENERATED_ASSETS, A_PROMPT_PACKAGE, A_PROMPT_QC, A_RENDER_BUDGET_APPROVAL]
+    requires: [A_STORYBOARD, A_VISUAL_BIBLE, A_ASSET_REGISTER]
+    exit_gate: G_RENDER_READY
+  MEDIA_PRODUCTION:
+    display_order: 11
+    name: 成片图文制作与技术检验
+    produces: [A_VIDEO_MASTER, A_IMAGE_SET, A_ARTICLE_LAYOUT, A_COVER, A_SUBTITLES, A_TECH_QC, A_ACTUAL_COST, A_COST_LEDGER]
+    requires: [A_ASSET_MANIFEST, A_PROMPT_PACKAGE, A_PROMPT_QC, A_RENDER_BUDGET_APPROVAL]
+    exit_gate: G_TECHNICAL_QC_PASS
+  DELIVERY_PACKAGE:
+    display_order: 12
+    name: 内容终检与发布承接包
+    produces: [A_FINAL_REVIEW, A_MEDIA_DELIVERY, A_PUBLISH_PACKAGE, A_PUBLISH_GUIDE, A_RESPONSE_PLAYBOOK, A_TRACE_CODE_SET, A_DELIVERY_RECORD]
+    requires: [A_VIDEO_MASTER, A_IMAGE_SET, A_GROWTH_PLAYBOOK, A_CONTENT_CALENDAR, A_OFFER_PATH, A_TRACKING_SPEC]
+    exit_gate: G_DELIVERY_READY
+  PUBLISH_OPERATE:
+    display_order: 13
+    name: 发布上线与首轮运营
+    produces: [A_PUBLISH_LOG, A_ONLINE_EVIDENCE, A_FIRST_RESPONSE_LOG, A_PUBLISH_EXCEPTION]
+    requires: [A_PUBLISH_PACKAGE, A_PUBLISH_GUIDE, A_TRACKING_SPEC, A_DUTY_ROSTER]
+    exit_gate: G_PUBLISH_READY
+  LEAD_OPERATION:
+    display_order: 14
+    name: 评论私信与公域线索运营
+    produces: [A_INTERACTION_LOG, A_LEAD_LEDGER, A_LEAD_CLASSIFICATION, A_RISK_ESCALATION_LOG]
+    requires: [A_PUBLISH_LOG, A_RESPONSE_PLAYBOOK, A_DUTY_ROSTER]
+    exit_gate: G_LEAD_CAPTURED
+  CONVERSION_OPERATION:
+    display_order: 15
+    name: 预约、到店、成交与履约
+    produces: [A_APPOINTMENT_LEDGER, A_ARRIVAL_LEDGER, A_ORDER_LEDGER, A_FULFILLMENT_LEDGER, A_NO_SHOW_FOLLOWUP]
+    requires: [A_LEAD_LEDGER, A_OFFER_PATH, A_TRACKING_SPEC]
+    exit_gate: G_CONVERSION_RECORDED
+  RETENTION_OPERATION:
+    display_order: 16
+    name: 复购与转介绍运营
+    produces: [A_SERVICE_FOLLOWUP, A_RETENTION_LEDGER, A_REFERRAL_LEDGER, A_REVIEW_RIGHTS]
+    requires: [A_FULFILLMENT_LEDGER, A_OFFER_PATH]
+    exit_gate: G_RETENTION_LOOP_READY
+  WEEKLY_REVIEW:
+    display_order: 17
+    name: 每周数据归因与调整
+    produces: [A_WEEKLY_REVIEW, A_ATTRIBUTION_REPORT, A_PROBLEM_OWNERSHIP, A_NEXT_WEEK_ACTIONS, A_EXPERIMENT_BACKLOG]
+    requires: [A_PUBLISH_LOG, A_LEAD_LEDGER, A_ORDER_LEDGER, A_FULFILLMENT_LEDGER, A_RETENTION_LEDGER, A_COST_LEDGER]
+    exit_gate: G_WEEKLY_REVIEW_READY
+  MONTHLY_CLOSE:
+    display_order: 18
+    name: 月度经营报告与下周期方案
+    produces: [A_MONTHLY_OPERATING_REPORT, A_MONTHLY_COST_REPORT, A_NEXT_CYCLE_PLAN, A_BUDGET_REVISION, A_RENEWAL_SCOPE]
+    requires: [A_WEEKLY_REVIEW, A_ATTRIBUTION_REPORT, A_ORDER_LEDGER, A_FULFILLMENT_LEDGER, A_PUBLISH_LOG]
+    exit_gate: G_CYCLE_CLOSED
+
+artifacts:
+  A_PROJECT_CHARTER: {client_view: D_START_EXECUTION_GUIDE, path: artifacts/project/A_PROJECT_CHARTER.md}
+  A_STORE_FACTS: {client_view: D_START_ASSET_LIST, path: artifacts/project/A_STORE_FACTS.md}
+  A_BUSINESS_DIAGNOSIS: {client_view: D_START_BUSINESS_DIAGNOSIS, path: artifacts/diagnosis/A_BUSINESS_DIAGNOSIS.md}
+  A_AUDIENCE_PROFILE: {client_view: D_START_AUDIENCE, path: artifacts/insight/A_AUDIENCE_PROFILE.md}
+  A_LOCAL_COMPETITOR_SCAN: {client_view: D_START_COMPETITION, path: artifacts/insight/A_LOCAL_COMPETITOR_SCAN.md}
+  A_OFFER_PORTFOLIO: {client_view: D_START_OFFER_PATH, path: artifacts/offer/A_OFFER_PORTFOLIO.md}
+  A_GROWTH_PLAYBOOK: {client_view: D_START_GROWTH_PLAYBOOK, path: artifacts/strategy/A_GROWTH_PLAYBOOK.md}
+  A_ACCOUNT_BASELINE: {client_view: D_START_INFRA_CHECKLIST, path: artifacts/infra/A_ACCOUNT_BASELINE.md}
+  A_CONTENT_MATRIX: {client_view: D_CYCLE_CALENDAR, path: artifacts/calendar/A_CONTENT_MATRIX.md}
+  A_TOPIC_FINAL: {client_view: D_CYCLE_TOPICS, path: artifacts/topic/A_TOPIC_FINAL.md}
+  A_COPY_FINAL: {client_view: D_CYCLE_COPY_SET, path: artifacts/copy/A_COPY_FINAL.md}
+  A_PLATFORM_COPY_PACK: {client_view: D_CYCLE_PLATFORM_COPY, path: artifacts/copy/A_PLATFORM_COPY_PACK.md}
+  A_STORYBOARD: {client_view: D_CYCLE_VISUAL_PLAN, path: artifacts/creative/A_STORYBOARD.md}
+  A_VIDEO_MASTER: {client_view: D_CYCLE_MEDIA, path: artifacts/media/A_VIDEO_MASTER.mp4}
+  A_PUBLISH_PACKAGE: {client_view: D_CYCLE_PUBLISH_PACK, path: artifacts/delivery/A_PUBLISH_PACKAGE.md}
+  A_PUBLISH_GUIDE: {client_view: D_CYCLE_PUBLISH_GUIDE, path: artifacts/delivery/A_PUBLISH_GUIDE.md}
+  A_RESPONSE_PLAYBOOK: {client_view: D_CYCLE_RESPONSE_GUIDE, path: artifacts/delivery/A_RESPONSE_PLAYBOOK.md}
+  A_PUBLISH_LOG: {client_view: D_OPS_PUBLISH_LOG, path: artifacts/ops/A_PUBLISH_LOG.md}
+  A_LEAD_LEDGER: {client_view: D_OPS_FUNNEL_LEDGER, path: artifacts/ops/A_LEAD_LEDGER.md}
+  A_WEEKLY_REVIEW: {client_view: D_OPS_WEEKLY_REVIEW, path: artifacts/review/A_WEEKLY_REVIEW.md}
+  A_NEXT_WEEK_ACTIONS: {client_view: D_OPS_NEXT_WEEK_ACTIONS, path: artifacts/review/A_NEXT_WEEK_ACTIONS.md}
+  A_MONTHLY_OPERATING_REPORT: {client_view: D_OPS_MONTHLY_REPORT, path: artifacts/review/A_MONTHLY_OPERATING_REPORT.md}
+  A_NEXT_CYCLE_PLAN: {client_view: D_OPS_NEXT_CYCLE_PLAN, path: artifacts/review/A_NEXT_CYCLE_PLAN.md}
+
+  A_ACTUAL_COST: {client_view: internal, path: artifacts/media_production/A_ACTUAL_COST.md}
+  A_APPOINTMENT_LEDGER: {client_view: internal, path: artifacts/conversion_operation/A_APPOINTMENT_LEDGER.md}
+  A_ARRIVAL_LEDGER: {client_view: internal, path: artifacts/conversion_operation/A_ARRIVAL_LEDGER.md}
+  A_ARTICLE_LAYOUT: {client_view: internal, path: artifacts/media_production/A_ARTICLE_LAYOUT.md}
+  A_ASSET_MANIFEST: {client_view: internal, path: artifacts/media_prep/A_ASSET_MANIFEST.md}
+  A_ASSET_REGISTER: {client_view: internal, path: artifacts/project_charter/A_ASSET_REGISTER.md}
+  A_ATTRIBUTION_REPORT: {client_view: internal, path: artifacts/weekly_review/A_ATTRIBUTION_REPORT.md}
+  A_AUTHORIZATION_REGISTER: {client_view: internal, path: artifacts/project_charter/A_AUTHORIZATION_REGISTER.md}
+  A_BASELINE_LEDGER: {client_view: internal, path: artifacts/business_diagnosis/A_BASELINE_LEDGER.md}
+  A_BOOKING_ENTRY_CHECK: {client_view: internal, path: artifacts/operating_infra/A_BOOKING_ENTRY_CHECK.md}
+  A_BUDGET_GUARDRAIL: {client_view: internal, path: artifacts/growth_strategy/A_BUDGET_GUARDRAIL.md}
+  A_BUDGET_REVISION: {client_view: internal, path: artifacts/monthly_close/A_BUDGET_REVISION.md}
+  A_CAPACITY_GUARD: {client_view: internal, path: artifacts/offer_path/A_CAPACITY_GUARD.md}
+  A_CAPACITY_PROFILE: {client_view: internal, path: artifacts/business_diagnosis/A_CAPACITY_PROFILE.md}
+  A_CONTENT_BENCHMARKS: {client_view: internal, path: artifacts/market_insight/A_CONTENT_BENCHMARKS.md}
+  A_CONTENT_CALENDAR: {client_view: internal, path: artifacts/content_calendar/A_CONTENT_CALENDAR.md}
+  A_COPY_APPROVAL: {client_view: internal, path: artifacts/copy_package/A_COPY_APPROVAL.md}
+  A_COPY_REVIEW: {client_view: internal, path: artifacts/copy_package/A_COPY_REVIEW.md}
+  A_COPY_VERSION_1: {client_view: internal, path: artifacts/copy_package/A_COPY_VERSION_1.md}
+  A_COPY_VERSION_2: {client_view: internal, path: artifacts/copy_package/A_COPY_VERSION_2.md}
+  A_COPY_VERSION_3: {client_view: internal, path: artifacts/copy_package/A_COPY_VERSION_3.md}
+  A_COVER: {client_view: internal, path: artifacts/media_production/A_COVER.md}
+  A_CYCLE_BUDGET: {client_view: internal, path: artifacts/content_calendar/A_CYCLE_BUDGET.md}
+  A_DATA_GAPS: {client_view: internal, path: artifacts/business_diagnosis/A_DATA_GAPS.md}
+  A_DELIVERY_RECORD: {client_view: internal, path: artifacts/delivery_package/A_DELIVERY_RECORD.md}
+  A_DUTY_ROSTER: {client_view: internal, path: artifacts/operating_infra/A_DUTY_ROSTER.md}
+  A_EXPERIMENT_BACKLOG: {client_view: internal, path: artifacts/weekly_review/A_EXPERIMENT_BACKLOG.md}
+  A_EXTERNAL_CALIBRATION: {client_view: internal, path: artifacts/topic_experiment/A_EXTERNAL_CALIBRATION.md}
+  A_FINAL_REVIEW: {client_view: internal, path: artifacts/delivery_package/A_FINAL_REVIEW.md}
+  A_FIRST_RESPONSE_LOG: {client_view: internal, path: artifacts/publish_operate/A_FIRST_RESPONSE_LOG.md}
+  A_FULFILLMENT_LEDGER: {client_view: internal, path: artifacts/conversion_operation/A_FULFILLMENT_LEDGER.md}
+  A_FUNNEL_TARGETS: {client_view: internal, path: artifacts/growth_strategy/A_FUNNEL_TARGETS.md}
+  A_GENERATED_ASSETS: {client_view: internal, path: artifacts/media_prep/A_GENERATED_ASSETS.md}
+  A_IMAGE_SET: {client_view: internal, path: artifacts/media_production/A_IMAGE_SET.md}
+  A_INTERACTION_LOG: {client_view: internal, path: artifacts/lead_operation/A_INTERACTION_LOG.md}
+  A_LEAD_CLASSIFICATION: {client_view: internal, path: artifacts/lead_operation/A_LEAD_CLASSIFICATION.md}
+  A_MARKET_INSIGHT: {client_view: internal, path: artifacts/misc/A_MARKET_INSIGHT.md}
+  A_MATERIAL_BLOCKLIST: {client_view: internal, path: artifacts/market_insight/A_MATERIAL_BLOCKLIST.md}
+  A_MATERIAL_PLAN: {client_view: internal, path: artifacts/content_calendar/A_MATERIAL_PLAN.md}
+  A_MEDIA_DELIVERY: {client_view: internal, path: artifacts/delivery_package/A_MEDIA_DELIVERY.md}
+  A_MONTHLY_COST_REPORT: {client_view: internal, path: artifacts/monthly_close/A_MONTHLY_COST_REPORT.md}
+  A_COST_LEDGER: {client_view: internal, path: artifacts/ops/A_COST_LEDGER.md}
+  A_NO_SHOW_FOLLOWUP: {client_view: internal, path: artifacts/conversion_operation/A_NO_SHOW_FOLLOWUP.md}
+  A_OFFER_PATH: {client_view: internal, path: artifacts/offer_path/A_OFFER_PATH.md}
+  A_ONLINE_EVIDENCE: {client_view: internal, path: artifacts/publish_operate/A_ONLINE_EVIDENCE.md}
+  A_ORDER_LEDGER: {client_view: internal, path: artifacts/conversion_operation/A_ORDER_LEDGER.md}
+  A_POI_CHECK: {client_view: internal, path: artifacts/operating_infra/A_POI_CHECK.md}
+  A_PROBLEM_OWNERSHIP: {client_view: internal, path: artifacts/weekly_review/A_PROBLEM_OWNERSHIP.md}
+  A_PROMPT_PACKAGE: {client_view: internal, path: artifacts/media_prep/A_PROMPT_PACKAGE.md}
+  A_PROMPT_QC: {client_view: internal, path: artifacts/media_prep/A_PROMPT_QC.md}
+  A_PUBLISH_EXCEPTION: {client_view: internal, path: artifacts/publish_operate/A_PUBLISH_EXCEPTION.md}
+  A_REFERRAL_LEDGER: {client_view: internal, path: artifacts/retention_operation/A_REFERRAL_LEDGER.md}
+  A_RENDER_BUDGET_APPROVAL: {client_view: internal, path: artifacts/media_prep/A_RENDER_BUDGET_APPROVAL.md}
+  A_RENEWAL_SCOPE: {client_view: internal, path: artifacts/monthly_close/A_RENEWAL_SCOPE.md}
+  A_RETENTION_LEDGER: {client_view: internal, path: artifacts/retention_operation/A_RETENTION_LEDGER.md}
+  A_REVIEW_RIGHTS: {client_view: internal, path: artifacts/retention_operation/A_REVIEW_RIGHTS.md}
+  A_RIGHTS_REGISTER: {client_view: internal, path: artifacts/project_charter/A_RIGHTS_REGISTER.md}
+  A_RISK_ESCALATION_LOG: {client_view: internal, path: artifacts/lead_operation/A_RISK_ESCALATION_LOG.md}
+  A_RISK_PLAN: {client_view: internal, path: artifacts/growth_strategy/A_RISK_PLAN.md}
+  A_SCENE_ASSET_MAP: {client_view: internal, path: artifacts/creative_blueprint/A_SCENE_ASSET_MAP.md}
+  A_SERVICE_FOLLOWUP: {client_view: internal, path: artifacts/retention_operation/A_SERVICE_FOLLOWUP.md}
+  A_SHOT_REQUIREMENTS: {client_view: internal, path: artifacts/creative_blueprint/A_SHOT_REQUIREMENTS.md}
+  A_SUBTITLES: {client_view: internal, path: artifacts/media_production/A_SUBTITLES.md}
+  A_TECH_QC: {client_view: internal, path: artifacts/media_production/A_TECH_QC.md}
+  A_TOPIC_CANDIDATES: {client_view: internal, path: artifacts/topic_experiment/A_TOPIC_CANDIDATES.md}
+  A_TOPIC_EXPERIMENTS: {client_view: internal, path: artifacts/topic_experiment/A_TOPIC_EXPERIMENTS.md}
+  A_TRACE_CODE_SET: {client_view: internal, path: artifacts/delivery_package/A_TRACE_CODE_SET.md}
+  A_TRACKING_SPEC: {client_view: internal, path: artifacts/operating_infra/A_TRACKING_SPEC.md}
+  A_UNIT_ECONOMICS: {client_view: internal, path: artifacts/offer_path/A_UNIT_ECONOMICS.md}
+  A_VISUAL_BIBLE: {client_view: internal, path: artifacts/creative_blueprint/A_VISUAL_BIBLE.md}
+  A_VOICE_BASELINE: {client_view: internal, path: artifacts/creative_blueprint/A_VOICE_BASELINE.md}
+gates:
+  # 未接入自动执行器的检查显式标为人工，统一入口不得静默放行。
+  # 会话级门（无生产节点、无产物）：由 workflow_gate.py 读 env 的会话上下文自动判定。
+  G_CLIENT_CONTEXT_LOADED:
+    checks:
+      - {id: client_context_loaded, implemented: true}
+  G_PROJECT_AUTHORIZED: {checks: [{id: project_authorization, implemented: false, manual: true}]}
+  G_BUSINESS_BASELINE_READY: {checks: [{id: business_baseline, implemented: false, manual: true}]}
+  G_OFFER_VIABLE: {checks: [{id: offer_viability, implemented: false, manual: true}]}
+  G_INFRA_READY_FOR_PUBLISH: {checks: [{id: operating_infra, implemented: false, manual: true}]}
+  G_CONTENT_PLAN_READY: {checks: [{id: content_plan, implemented: false, manual: true}]}
+  G_TOPIC_READY:
+    checks:
+      - {id: topic_review, implemented: true, manual: true}
+  G_COPY_READY:
+    checks:
+      - {id: copy_review, implemented: true, manual: true}
+  G_CREATIVE_READY:
+    checks:
+      - {id: artifact_schema, implemented: true}
+      - {id: storyboard_dual_parser, implemented: true}
+      - {id: voice_policy, implemented: true}
+      - {id: huolong_six_storyboard, implemented: true}
+      - {id: upstream_artifact_hashes, implemented: true}
+  G_RENDER_READY:
+    checks:
+      - {id: three_view_structure, implemented: true}
+      - {id: render_readiness, implemented: false, manual: true}
+  G_TECHNICAL_QC_PASS:
+    checks:
+      - {id: technical_qc, implemented: false, manual: true}
+      - {id: huolong_six_subtitle, implemented: true}
+  G_DELIVERY_READY:
+    checks:
+      - {id: delivery_review, implemented: true, manual: true}
+  G_PUBLISH_READY: {checks: [{id: publish_review, implemented: false, manual: true}]}
+  G_LEAD_CAPTURED: {checks: [{id: lead_review, implemented: false, manual: true}]}
+  G_CONVERSION_RECORDED: {checks: [{id: conversion_review, implemented: false, manual: true}]}
+  G_RETENTION_LOOP_READY: {checks: [{id: retention_review, implemented: false, manual: true}]}
+  G_WEEKLY_REVIEW_READY: {checks: [{id: weekly_review, implemented: false, manual: true}]}
+  G_CYCLE_CLOSED: {checks: [{id: monthly_close, implemented: false, manual: true}]}
+  G_STRATEGY_BY_CODEX:
+    checks:
+      - {id: legacy_strategy_score, implemented: true}
+      - {id: produced_by_codex, implemented: true}
+      - {id: upstream_artifact_hashes, implemented: true}

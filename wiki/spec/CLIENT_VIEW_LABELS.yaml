@@ -1,0 +1,30 @@
+meta:
+  version: "1.0"
+  updated_at: "2026-08-16"
+stages:
+  S-A: {label: "资料建档", one_liner: "资料收到了"}
+  S-B: {label: "门店摸底", one_liner: "正在做门店体检、同行研究和整体打法"}
+  S-C: {label: "内容方案", one_liner: "正在确定拍什么、说什么和怎么拍"}
+  S-D: {label: "成片制作", one_liner: "正在制作片子"}
+  S-E: {label: "交付", one_liner: "内容已做好，可以领取"}
+  S-F: {label: "上线与复盘", one_liner: "准备发布指引和复盘动作"}
+nodes:
+  PROJECT_CHARTER: {stage: "S-A", client_label: "资料建档", one_liner: "整理门店资料、素材与授权"}
+  BUSINESS_DIAGNOSIS: {stage: "S-B", client_label: "门店体检", one_liner: "梳理经营现状、优势与待补信息"}
+  MARKET_INSIGHT: {stage: "S-B", client_label: "顾客与同行洞察", one_liner: "研究同城顾客和同行内容"}
+  OFFER_PATH: {stage: "S-B", client_label: "主推项目与预约路径", one_liner: "确定主推项目和到店承接方式"}
+  GROWTH_STRATEGY: {stage: "S-B", client_label: "整体打法", one_liner: "制定平台、内容和转化打法"}
+  OPERATING_INFRA: {stage: "S-B", client_label: "账号与承接准备", one_liner: "检查账号、门店位置和预约入口"}
+  CONTENT_CALENDAR: {stage: "S-B", client_label: "内容排期", one_liner: "安排本周期内容节奏"}
+  TOPIC_EXPERIMENT: {stage: "S-C", client_label: "这次拍什么", one_liner: "从候选方向中选出本次主题"}
+  COPY_PACKAGE: {stage: "S-C", client_label: "台词与文案", one_liner: "完成多版文案评审和定稿"}
+  CREATIVE_BLUEPRINT: {stage: "S-C", client_label: "画面规划", one_liner: "把台词拆成可执行的画面"}
+  MEDIA_PREP: {stage: "S-D", client_label: "制作准备", one_liner: "核对素材并准备制作"}
+  MEDIA_PRODUCTION: {stage: "S-D", client_label: "成片制作", one_liner: "正在制作和检查成片"}
+  DELIVERY_PACKAGE: {stage: "S-E", client_label: "交付包", one_liner: "整理成片、文案和发布资料"}
+  PUBLISH_OPERATE: {stage: "S-F", client_label: "发布指引", one_liner: "准备手动发布步骤"}
+  LEAD_OPERATION: {stage: "S-F", client_label: "线索运营", one_liner: "整理评论、私信和咨询"}
+  CONVERSION_OPERATION: {stage: "S-F", client_label: "到店与成交", one_liner: "记录预约、到店和成交"}
+  RETENTION_OPERATION: {stage: "S-F", client_label: "复购运营", one_liner: "跟进服务、复购和转介绍"}
+  WEEKLY_REVIEW: {stage: "S-F", client_label: "周复盘", one_liner: "复盘本周数据并安排下周动作"}
+  MONTHLY_CLOSE: {stage: "S-F", client_label: "月度报告", one_liner: "汇总本月经营结果和下周期计划"}
