@@ -1,0 +1,163 @@
+---
+name: wan30-koubo-workflow
+description: 用wan3.0生成自定义人物口播视频，仅在用户明确点名 wan3.0 时使用（默认出片只走快乐马 happyhorse-1.1-r2v）。触发：用户明确点名 wan3.0 口播。
+---
+
+<!-- CANONICAL-RULINGS-BEGIN -->
+> ⚠️ **本文件与视频线统一口径冲突的地方，一律以统一口径为准（用户 2026-10-01 逐条拍板），旧写法作废。**
+> 统一口径单一事实源：`.hermes/skills/newmedia-operations/huolong-replica-template/references/current-rulings-20261001.md`
+> 摘要：段时长＝字数÷5.5（不提速）；句数不限、只看语言逻辑；双人段必须互相说；画面/人物/禁止事项照旧写，只有配音部分不写段首段尾语速；画幅听用户当次要求（默认竖屏 720×1280，双人优先横屏）；LOGO 念到 CTA 时淡入保持 1.5 秒；默认只用快乐马出片，婵镜/Seedance/探店线用户点名才用；成片响度 -14 LUFS；BGM 0.25；CRF 18／aac 128k／24fps；实念率底线 90%；参考片＝过审基准，照抄不退稿。
+<!-- CANONICAL-RULINGS-END -->
+
+
+# wan3.0 口播视频生成工作流
+
+## 定位
+
+用阿里 wan3.0 的 `reference_image` + 原生有声台词能力，生成自定义人物的口播视频。比婵镜数字人更灵活（换参考图即可换人），比 Seedance 更便宜（无真人检测拦截），仅在用户点名 wan3.0 时，用于需要变人物/变场景的口播素材。
+
+**与 huoshan 口播分支的关系**：huoshan 口播走婵镜 create_video 数字人，适合固定数字人 ID 高质量口型（婵镜同样只在用户明确点名时才用）。本工作流走 wan3.0 reference_image，适合自定义人物/场景变换/快速出片。
+
+## 触发条件
+
+> ⚠️ 默认出片只走快乐马 happyhorse-1.1-r2v。本工作流（wan3.0）只在用户明确点名 wan3.0 时使用，不自行选择，产出物里也不提工具名。
+
+- 前提：用户已明确点名 wan3.0；以下只说明点名后的适用情况，不能拿来自行选用
+- 人物参考一律用年轻形象，40 岁及以上（含 40 岁整）的参考图不用
+- 需要原生有声台词（wan3.0 自动生成配音）
+
+## 工作流步骤
+
+### 1. codex 出 Seedream 五层提示词
+
+派 codex 按人物描述生成 Seedream 5.0 文生图提示词，人物一律用年轻形象（40 岁以下）。旧存档 `references/prompt-middleaged-woman-home.md` 是中年形象，已停用：只能参考它的五层结构写法，人物设定不能照用。
+
+任务书模板：
+
+```
+USER_REQ: 生成XX角色的人物参考图提示词（人物一律年轻形象，40 岁以下）
+DATA_SOURCE: 人物特征描述（性别/气质/场景/服装要求）
+PROJECT_DIR: <项目目录>
+产出要求: 写一个 Seedream 5.0 文生图提示词，按五层结构：
+  L1主体基础层→L2肤质妆容层→L3体态情绪穿搭层→L4镜头光影构图层→L5场景氛围画质层→NEG负向提示词
+  格式铁律：自然段落式（句号分号组织），具体可执行（不写抽象词），负向用「无XX」格式
+  唇色统一写「接近肤色的自然淡裸粉，仅带轻微血色，不偏玫红不偏荧光」
+  尺寸跟当次成片画幅一致：竖版 1440x2560（9:16），横版 2560x1440（16:9）
+（其余字段由打包器补，任务书里不写角色、上下文、约定这些栏目）
+```
+
+调用命令（新加坡机）：
+```bash
+codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
+  -c model_reasoning_effort=high -C /home/ubuntu/workflow "$(cat /tmp/prompt.txt)" 2>&1 | tail -100
+```
+
+### 2. Seedream 5.0 生成参考图
+
+- 模型：`doubao-seedream-5-0-260128`
+- 尺寸：跟当次成片画幅一致，竖版 `1440x2560`（9:16），横版 `2560x1440`（16:9），都满足最低 368.64 万像素
+- 调用：一律通过 `hermes_task_dispatch.py` 派发，不直连 ARK
+- 必须传正向+负向（JSON payload 方式）
+- 生成后必须 `vision_analyze` 自检：年龄/真实感/场景/无水印/无塑料感
+
+调用方式：按上面的参数组好 payload（正向＋负向），交给 `hermes_task_dispatch.py` 派发执行。不要用 curl 经 8899 relay 直连 ARK。
+
+### 3. 参考图传广州公网目录
+
+DashScope wan3.0 需要图片有公网 URL。新加坡机没有公网 IP，需 scp 到广州机：
+
+```bash
+scp -P 2222 image.png ubuntu@127.0.0.1:/tmp/image.png
+ssh -p 2222 ubuntu@127.0.0.1 'cp /tmp/image.png /home/ubuntu/public/image.png'
+# 验证
+curl -s -o /dev/null -w "%{http_code}" http://<GZ_HOST>/image.png  # 返回200
+```
+
+### 4. wan3.0 生成口播视频
+
+- 模型：`wan3.0-video`
+- media 类型：`reference_image`（不是 first_frame）
+- `audio=true`（原生有声台词）
+- `prompt_extend=false`（**必须**，防止智能改写打乱台词）
+- `watermark=false`
+
+提示词模板：
+```
+图1中的[人物描述]坐在[场景描述]，面对镜头，进行口播讲述。她看着镜头，表情[情绪过渡描述]。
+
+配音与音效：环境为[场景环境音]。图1中的[人物]用[音色描述]的中文普通话，[情绪1]地说道：台词1。[情绪2]地说道：台词2。[情绪3]地说道：台词3。音量充足，不说任何多余的字。无背景音乐。
+```
+
+API 调用（SSH 到广州执行）：
+```bash
+ssh -p 2222 ubuntu@127.0.0.1 \
+  "curl -sS --connect-timeout 30 -X POST \
+    'https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+    -H 'X-DashScope-Async: enable' \
+    -H 'Authorization: Bearer $DASHSCOPE_API_KEY' \
+    -H 'Content-Type: application/json' \
+    -d @/tmp/payload.json"
+```
+
+### 5. 超长口播分段策略（>15秒文案）
+
+段时长＝字数 ÷ 5.5 向上取整（5.5 字/秒），单镜上限 15 秒（wan3.0 接口虽然支持 30 秒，口径上限按 15 秒算，约 82 字）。口播文案超过 15 秒时：
+
+1. **按语义节点切分**（不按等长切）：痛点段→主张段→证据段→总结段，每段≤15秒，每段 duration＝该段字数 ÷ 5.5 向上取整
+2. 每段都传**同一张参考图**，保证人物一致
+3. 每段提示词独立完整：人物描述 + 场景描述 + 音色 + 全部台词（逐句标情绪）+ 音量充足 + 不说任何多余的字（配音部分不写段首／段尾／语速描述，也不写静默留白指令）
+4. 台词写法：`图1中的年轻女性用[音色]的中文普通话，[情绪1]地说道：台词1。[情绪2]地说道：台词2。`（自然语言、逐句附情绪，**不用英文双引号**，不写逐句时码）
+5. `prompt_extend=false` 是**必须项**
+6. 分段提交后可并行轮询
+7. ffmpeg 拼接各段 + 补录屏/字幕/BGM
+
+### 6. ffmpeg 合成
+
+口播段 + App录屏素材 + 字幕 + BGM + Logo + CTA。合成参数按统一口径：主字幕白字黑描边、无黑底、无半透明背景条，字体文泉驿正黑，横竖版一律 54px（实存脚本值），`PLAY_RES` 跟当次画幅设；手机贴片贴右侧（高 60–65%、宽 22–25%，允许压住人物），提现档位页按 528×240 @ x=640 y=380；左下角按类型写底层小字，侧边竖排「累计签到后可提现」；LOGO 不常驻，念到 CTA 时淡入、保持 1.5 秒后撤下；BGM 0.25；响度 `loudnorm=I=-14:TP=-1.5:LRA=11`；编码 `libx264 -preset medium -crf 18 -r 24 -pix_fmt yuv420p -c:a aac -b:a 128k -ar 48000 -movflags +faststart`。交付前实念率≥90%（>105% 要人耳复核）；成片超过 20MB 先压缩，再按 file 类型发飞书。
+
+## 关键参数速查
+
+| 参数 | 值 | 说明 |
+|:---|:---|:---|
+| model | wan3.0-video | All-in-One 模型 |
+| media type | reference_image | 参考图（不锁首帧） |
+| resolution | 1080P | 生成用；成片按画幅缩放到 720×1280（竖）／1280×720（横） |
+| ratio | 按用户当次要求 | 用户没说画幅时：含双人段就整片横版 16:9（1280×720），纯单人片竖版 9:16（720×1280） |
+| duration | ≤15 | 字数 ÷ 5.5 向上取整，单镜上限 15 秒 |
+| audio | true | 原生有声台词 |
+| prompt_extend | false | **必须**，保护台词精确性 |
+| watermark | false | 无水印 |
+
+## 与婵镜数字人对比
+
+| 维度 | wan3.0 口播 | 婵镜数字人 |
+|:---|:---|:---|
+| 人物灵活性 | 高（换参考图即可） | 低（需克隆数字人ID） |
+| 有声台词 | 原生生成（模型自动配音） | TTS+口型驱动 |
+| 成本 | 1080P 20秒约5元（6折后） | 按字数计费 |
+| 真人检测 | 无 | 无 |
+| 口型同步 | 模型自动（一般） | 更精确（专用口型驱动） |
+| 适用场景 | 变量人物/场景/预算敏感 | 固定数字人/高质量口型 |
+
+## 踩坑
+
+- **参考图必须公网可访问**：DashScope 需要图片有公网 URL，新加坡机 scp 到广州 `/home/ubuntu/public/`
+- **新加坡直连 DashScope 被墙**：必须 SSH 到广州机执行 curl，8899 relay 丢 `X-DashScope-Async` header 导致 403
+- **台词不用英文双引号**：用 `人物说：xxx` 自然语言格式，英文双引号会把文字渲染到画面上
+- **prompt_extend=false 是必须**：不设 false 会智能改写台词，导致逐字稿不保
+- **分段不按等长切**：按语义节点切分（痛点段→主张段→证据段→总结段），每段≤15秒（字数 ÷ 5.5 向上取整）
+- **wan3.0 不支持 negative_prompt**：禁止条件写在正向提示词末尾
+- **reference_image 不锁首帧**：与 first_frame 不同，reference_image 是角色参考，模型参考其外观但不以它为首帧
+
+### SCP 下载视频文件的三个验证坑（2026-08-26 实测）
+
+- **ffprobe 元数据可骗人——半截文件仍显示完整规格**：SCP 传到一半被 kill 的文件，ffprobe 照读 header 说「1080×1920 30fps 20s」，但实际只能解码 3.7 秒视频。**必须用 `ffmpeg -v error -i <file> -f null -` 做完整解码验证**，error 行数=0 才算完好。ffprobe 只读容器头，不验数据。
+- **广州机 /tmp 残留旧文件会张冠李戴**：多轮生成（快乐马→wan3.0）会在广州 `/tmp` 留下旧文件（如 part1.mp4 可能是上一轮 720p 24fps 15.2s 的快乐马产物）。下载前**必须先 SSH 查源文件规格**（分辨率+帧率+时长+采样率），确认与本次生成预期一致再下载。不要假设 `/tmp/part1.mp4` 就是这次的。
+- **多段口播必须校验规格一致性**：Part1 和 Part2 如果分辨率、帧率、采样率、时长全不一样（如 720p/24fps/15.2s vs 1080p/30fps/20s），说明不是同一次生成的产物。**下载前先在广州机上 ffprobe 所有段，确认规格一致**，再批量拉取。
+
+## 关联
+
+- `dashscope-video-generation`：wan3.0 API 格式、参数、官方提示词参考库
+- `seedream-image-generation`：Seedream 五层提示词体系、写实人像优化、已知坑点
+- `huoshan`：三通道生产流程；默认口播走快乐马 happyhorse-1.1-r2v，婵镜数字人和 wan3.0（本工作流）都只在用户点名时启用
+- `codex-bridge`：codex exec 调用模板、状态码解析

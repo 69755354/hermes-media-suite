@@ -41,7 +41,7 @@
 - 用户 Mac：MacBook Pro（SSH key 显示 <MAC_HOST>，<MAC_USER> 用户）
 - 广州机 /home/ubuntu/public/guardian.py：Mac 守护器轮询 http://<GZ_HOST>/api/tasks（caddy `/api/*` → 127.0.0.1:8088 task_api.py）
 - ⚠️ **guardian shell action 已禁用（2026-08-22 实查）**：`if action == "shell": raise Exception("shell action 已禁用")`——只剩 export_jianying / upload_file / list_bgm / upload_bgm。旧文档「可下发 shell 查 system_profiler」已失效，不能靠它远程装环境/跑脚本。
-- 广州机 authorized_keys 6 个 key：u0_a209@localhost / hk-to-gz / ubuntu@VM-0-11-ubuntu / mac-jianying / singapore-to-guangzhou / <LOCAL_EMAIL> —— Mac 反向隧道 key 已配好，但**隧道不会自动起**；2026-08-22 实查 Mac 离线（广州 who 无连接、新加坡 8000 无监听）。
+- 广州机 authorized_keys 6 个 key：u0_a209@localhost / hk-to-gz / ubuntu@VM-0-11-ubuntu / mac-jianying / singapore-to-guangzhou / <MAC_USER>@<MAC_HOST>.local —— Mac 反向隧道 key 已配好，但**隧道不会自动起**；2026-08-22 实查 Mac 离线（广州 who 无连接、新加坡 8000 无监听）。
 - **Mac 远程执行替代通道**：jianying-remote-automation 那套（Mac 上 jianying-web.py Flask :8000 + `ssh -R 8000:localhost:8000` 反向隧道），隧道起来了服务器才能 POST /run。部署 Mac worker 前置三件套：**Mac 开机 + 隧道在线 + 能执行命令**；缺一部署推不动。
 - **直连 Mac SSH 的反向隧道命令（2026-08-22 实配）**：Mac 终端跑 `ssh -R 2223:localhost:22 -N ubuntu@<GZ_HOST>`（广州机，2223 自定义端口；首次 yes + 输 ubuntu 密码；命令挂住不退出=隧道活），服务器侧 `ssh -p 2223 ubuntu@127.0.0.1` 连回 Mac。Mac 国内宽带多为 CGNAT 大内网（`curl ifconfig.me` 公网 IP ≠ 本地 IP、本地 IP 为 100.64.x/10.x/192.168.x 即大内网），服务器无法直连，只能 Mac 主动建隧道。发此命令给用户必须纯文本（禁反引号/代码块，聊天复制会带脏字符）。
 - **guardian 在线探针（验证 Mac 守护器是否活着，2026-08-22 实跑）**：放一个 pending 只读任务到广州机 `task_api.py` 队列，等 ~75 秒（guardian 30 秒轮询周期），看是否被取走：

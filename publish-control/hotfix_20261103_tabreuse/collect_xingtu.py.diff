@@ -1,0 +1,42 @@
+--- /home/ubuntu/workflow/projects/publish_control/build_1.2.173/manju-publish-assistant-1.2.173-win64/agent/winport/collect_xingtu.py	2026-10-30 16:14:06.811695003 +0800
++++ /home/ubuntu/workflow/projects/publish_control/hotfix_20261103_tabreuse/files/collect_xingtu.py	2026-11-03 22:06:25.752393844 +0800
+@@ -393,6 +393,17 @@
+     return {"json": str(json_path)}
+ 
+ 
++def _existing_site_page(context, host):
++    """Reuse the tab this program already opened; never spawn a twin."""
++    for page in getattr(context, "pages", None) or []:
++        try:
++            if host in str(page.url or ""):
++                return page
++        except Exception:
++            continue
++    return None
++
++
+ def collect_offline(layout, user_path, performance_path, detail_paths=(), *,
+                     day=None) -> dict:
+     user_payload = read_json(Path(user_path))
+@@ -434,7 +445,10 @@
+         contexts = browser.contexts
+         if not contexts:
+             raise ConfigError("未检测到已登录的工作台，请先打开并登录后再取数。")
+-        page = contexts[0].new_page()
++        page = _existing_site_page(contexts[0], "xingtu.cn")
++        created_page = page is None
++        if page is None:
++            page = contexts[0].new_page()
+         try:
+             def on_response(response):
+                 url = str(getattr(response, "url", ""))
+@@ -553,7 +567,8 @@
+                 data.setdefault("notes", []).append(
+                     "作品级金额卡片抓取失败，金额留空")
+         finally:
+-            page.close()
++            if created_page:
++                page.close()
+     return {"data": data, "outputs": write_outputs(layout, data, day=day)}
+ 
+ 

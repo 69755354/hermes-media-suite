@@ -1,0 +1,787 @@
+---
+name: dashscope-video-generation
+description: 阿里DashScope视频生成(快乐马/wan3.0/wan2.7)。触发：快乐马/wan3.0/i2v/r2v。
+author: Hermes curator
+license: MIT
+version: 1.0
+metadata:
+  hermes:
+    tags: [视频生成, 快乐马, HappyHorse, wan3.0, wan2.7, DashScope, 阿里云, 百炼]
+    category: business
+---
+
+<!-- CANONICAL-RULINGS-BEGIN -->
+> ⚠️ **本文件与视频线统一口径冲突的地方，一律以统一口径为准（用户 2026-10-01 逐条拍板），旧写法作废。**
+> 统一口径单一事实源：`.hermes/skills/newmedia-operations/huolong-replica-template/references/current-rulings-20261001.md`
+> 摘要：段时长＝字数÷5.5（不提速）；句数不限、只看语言逻辑；双人段必须互相说；画面/人物/禁止事项照旧写，只有配音部分不写段首段尾语速；画幅听用户当次要求（默认竖屏 720×1280，双人优先横屏）；LOGO 念到 CTA 时淡入保持 1.5 秒；默认只用快乐马出片，婵镜/Seedance/探店线用户点名才用；成片响度 -14 LUFS；BGM 0.25；CRF 18／aac 128k／24fps；实念率底线 90%；参考片＝过审基准，照抄不退稿。
+<!-- CANONICAL-RULINGS-END -->
+
+
+# 阿里 DashScope 视频生成（快乐马 HappyHorse / wan3.0 / wan2.7）
+
+## When to Use
+
+触发：用快乐马/wan3.0/wan2.7生成视频、DashScope视频API调用、i2v/r2v/t2v提示词写法、跨模型提示词适配（Seedance→快乐马/wan3.0）、DashScope视频模型选型对比、视频生成成本估算。
+
+本 skill 承载**视频生成模型规范、提示词公式、API格式、实测勘误和跨模型适配铁律**。GLM/MaaS网关/relay运维见 `aliyun-dashscope-ops`，三通道生产流程见 `huoshan`。
+
+## 一、模型清单
+
+> 来源：DashScope `/models` API + 官方文档 `help.aliyun.com/zh/model-studio/user-guide/video-generation`
+
+### 快乐马 HappyHorse 系列（默认出片通道：只走 happyhorse-1.1-r2v）
+
+> API参考：`help.aliyun.com/zh/model-studio/happyhorse-api-reference`（2026-08-26更新）
+> 子页面：文生视频/图生视频(首帧)/参考生视频/视频编辑
+
+| 模型ID | 能力 | 输入 | 时长 | fps | 水印默认 |
+|:---|:---|:---|:---|:---|:---|
+| happyhorse-1.1-t2v | 文生视频 | Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.1-i2v | 图生视频(仅1张首帧) | Image+Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.1-r2v | 参考生视频(1-9张) | Image+Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.0-t2v | 文生视频(旧版) | Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.0-i2v | 图生视频(旧版) | Image+Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.0-r2v | 参考生视频(旧版) | Image+Text | [3,15]秒 | 24fps | true |
+| happyhorse-1.0-video-edit | 视频编辑 | Text+Image+Video | — | — | — |
+
+**快乐马声音能力（0826更正）**：
+- 快乐马**能生成声音**——在提示词里写台词和声音描述，模型会自动生成配音
+- API参数层面没有 `audio` 开关（不像 wan3.0 有 audio=true/false），声音纯靠 prompt 驱动
+- 情绪/语调等声音控制全靠自然语言描述（语速一个字都不写；必须写正向词，如"情绪外放"；禁写"语速自然"）
+- ⚠️ **语速：提示词里不写任何语速描述词（2026-10-01 客户当面定案，覆盖本文件所有旧写法）**。客户原话：「你不写那个语速的描述词，然后你直接按照那个字数来」。快乐马参数表里本来就没有语速开关，措辞写了也不一定听话（历史旧口径「语速适中偏快」/「语速快」/「禁写语速适中」**全部作废**）。
+  → **唯一有效手段：按字数卡 duration**，`duration = ceil(字数 ÷ 5.5)`（单段 ≤15s）。实测（免费-11 段1，37 字/7s）：**密度 5.18 字/秒、段首静默 0.00s、实念率 95%**——不写语速描述词反而比写的时候更准（旧写法只有 4.6 字/秒）。
+  → 提示词里段首、段尾**一个字都不写**（客户 2026-10-01 追加：「段位也不用留白」）。静默/气口完全交给模型自然发挥：实测无指令时段首 0.00s 自然开口；段尾可能略有溢出（实测 -0.14s），**不当返工理由**，由合成端处理——剪掉段尾冻结帧、硬切拼接，成片末尾用尾卡/静音补足尾空（≥0.4s）。
+  → 提示词里只保留：音色描述 + 逐句情绪标注 + 「音量充足」+ 「不说任何多余的字」。不写「语速偏快」「语速适中偏快」，也不写「语速自然」。
+  （历史记录，已被统一口径⑤覆盖：提示词不写任何语速词，以下旧三方口径不再作为写语速的依据）① AGENTS.md 第九节旧要求「语速适中，吐字清晰」/「语速适中偏快」——已作废；② `workflow/scripts/workflow_gate.py:218` 的 `FAST_VOICE_RE` 把「语速偏快」判成违规（实测「语速适中偏快」不命中、放行）；③ 提交卡点 `workflow/scripts/_tools/dashscope_batch.py:74` 的 `VOICE_HINT` 是 `any()` 命中，有「配音：」或「语气」就过，并不是非要「语速偏快」三个字。
+  现行唯一口径：提示词里**任何语速描述词都不写**（语速适中／适中偏快／偏快／自然一律不写），和 AGENTS.md 旧语速写法冲突的地方以统一口径为准。
+- HappyHorse 参数表完整版：`resolution` / `ratio` / `duration` / `watermark` / `seed`（无 audio/prompt_extend）
+
+### wan3.0 系列（All-in-One，0826官方文档更新；默认停用，用户点名才用）
+
+> 文档地址：`help.aliyun.com/zh/model-studio/wan3-video-generation-guide`（2026-08-26更新）
+> 官方提示词参考：`references/wan3.0-prompts-reference.md`（11个官方示例全文）
+
+| 模型ID | 能力 | 输入 | 时长 | fps | 水印默认 |
+|:---|:---|:---|:---|:---|:---|
+| wan3.0-video | All-in-One（文生/图生/全模态参考/编辑/延长） | Text+Image+Video+Audio+File+Link | [2,30]秒 | 30fps | false |
+| wan3.0-video-prime | 高速版(能力对齐) | 同上 | [2,30]秒 | 30fps | false |
+
+**wan3.0 核心升级（0826）**：
+- **All-in-One**：一个模型名覆盖全部任务类型，根据 `input.media` 的 `type` 字段和提示词意图自动路由
+- **原生有声视频**：自动生成人声台词+BGM+音效，`audio=false` 可关
+- **全模态参考**：单次最多20个素材（图≤10张/视频≤5段总15s/音频≤5段总15s/文档1个/网页1个）
+- **视频编辑**：增删改元素、风格转换、光线编辑、台词编辑
+- **视频延长**：向前/向后/双向延长，输入+输出总时长≤30秒
+- **首尾帧控制**：`first_frame` + `last_frame` 像素级还原
+- **文件/网页生视频**：传PPT/Excel/Word/PDF/TXT/MD或公开网页链接，自动解析内容生成视频
+
+### wan2.7 系列（默认停用，用户点名才用；默认出片只走 happyhorse-1.1-r2v）
+
+| 模型ID | 能力 | 有声 | 输入 | 时长 | fps |
+|:---|:---|:---|:---|:---|:---|
+| wan2.7-t2v | 多镜头叙事+声画同步 | ✅ | 文本、音频 | [2,15]秒 | 30fps |
+| wan2.7-i2v | 首帧/首尾帧/续写 | ✅ | 文本、图像、音频 | [2,15]秒 | 30fps |
+| wan2.7-r2v | 复刻角色+声音(输入视频) | ✅ | 文本、图像、视频、音频 | [2,10]秒 | 30fps |
+| wan2.6-i2v-flash | 图生视频快速版 | ✅/无声 | 文本、图像、音频 | [2,15]秒 | 30fps |
+| wan2.7-videoedit | 视频编辑/迁移 | ✅/无声 | 文本、图像、视频 | [2,10]秒 | 30fps |
+
+> **wan2.7 r2v vs 快乐马 r2v 本质不同**：wan2.7-r2v 输入**视频**复刻角色+声音；HappyHorse-r2v 输入多张**静态图**做参考。需要多张静态图参考时用快乐马r2v。
+
+### 数字人/动作迁移系列（0825官方新增）
+
+| 模型 | 能力 | 输入 | 规格 |
+|:---|:---|:---|:---|
+| wan2.2-s2v | 图生唱演播报(替代EMO) | 图像+音频 | 480P(16fps)/720P(30fps)，≤20秒 |
+| wan2.2-animate-move | 图生动作(保留背景) | 图像+视频 | std(15fps)/pro(25fps)，2-30秒，720P |
+| wan2.2-animate-mix | 视频换人(保留背景) | 视频+图像 | std/pro，2-30秒，720P |
+
+### 第三方模型（百炼平台上架，仅中国内地）
+
+| 厂商 | 推荐模型 | 类型 | 有声 | 时长 |
+|:---|:---|:---|:---|:---|
+| 爱诗 PixVerse | pixverse-c1-t2v/it2v/kf2v/r2v | 全系列 | ✅ | 1-15秒 |
+| 可灵 Kling | kling-v3-omni-video-generation | 全能 | ✅ | 3-15秒 |
+| 生数 Vidu | viduq3-pro_text2video等 | 文生/图生/首尾帧 | ✅ | 1-16秒 |
+
+## 二、API调用
+
+### 端点
+
+**旧域名（仍可用）**：
+```
+POST https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis
+```
+
+**新域名（0826官方推荐迁移，性能更优）**：
+```
+POST https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis
+```
+- 新加坡：`{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com`
+- 华北2(北京)：`{WorkspaceId}.cn-beijing.maas.aliyuncs.com`
+- `{WorkspaceId}` 在百炼控制台→业务空间详情页查看
+- 查询结果：`GET .../api/v1/tasks/{task_id}`
+
+### 鉴权
+
+- Header: `Authorization: Bearer sk-ws-xxx`（DASHSCOPE_API_KEY）
+- Header: `X-DashScope-Async: enable`（**必选**！不加会403 "does not support synchronous calls"）
+- Header: `Content-Type: application/json`
+
+### 异步流程
+
+```
+1. 创建任务(POST + X-DashScope-Async) → 返回 task_id + PENDING
+2. 轮询(GET /tasks/{task_id}) → PENDING → RUNNING → SUCCEEDED(拿video_url) / FAILED
+3. 下载视频(video_url 是 OSS 加速域名，新加坡可直连下载)
+```
+
+### 新加坡调用方案
+
+**新加坡直连 dashscope.aliyuncs.com 被墙（TCP timeout）**。8899 relay 丢 `X-DashScope-Async` header → 403。
+
+**解法：SSH 到广州机执行 curl**
+```bash
+ssh -p 2222 -o ConnectTimeout=10 -o BatchMode=yes ubuntu@127.0.0.1 \
+  'curl -s --connect-timeout 30 -X POST "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis" \
+    -H "X-DashScope-Async: enable" \
+    -H "Authorization: Bearer sk-ws-xxx" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"wan3.0-video\",\"input\":{\"prompt\":\"...\"},\"parameters\":{\"resolution\":\"720P\",\"duration\":5}}"'
+```
+
+### 封装脚本
+
+`~/.hermes/scripts/dashscope_video.py`（0825更新，取代旧 `happyhorse_t2v.py`）
+- 统一支持 wan3.0 / happyhorse 全系列
+- 自动 SSH 到广州执行 curl
+- 自动轮询(15秒间隔) → 下载视频 → ffprobe 检查
+- 用法：默认出片只走 happyhorse-1.1-r2v（⑫），每次传多张参考图：人物参考图＋1 张场景图，type 都是 `reference_image`。多图请求用下节 `dashscope_batch.py` 的 manifest，job 写成：`{"id":"seg1","model":"happyhorse-1.1-r2v","prompt":"[Image 1]中的…站在[Image 2]中的…","images":["http://人物图URL","http://场景图URL"],"resolution":"720P","ratio":"<当次画幅 16:9 或 9:16>","duration":<ceil(本段字数÷5.5)，≤15>,"watermark":false}`。i2v 没有 ratio 参数，不要传 `--ratio`；i2v 只在用户点名时才用。
+
+### 批量并发出片（2026-09-27）
+
+**快乐马并发按账号实际配额走，核实之前一律按 5 跑**（补充裁定 56；旧「并发上限 20」作废）。单条 `dashscope_video.py` 一次只跑一个任务，多条片要串着跑。批量出片用：
+
+```bash
+python3 /home/ubuntu/workflow/scripts/_tools/dashscope_batch.py \
+  --manifest jobs.json --concurrency 5 --result out.json
+# 先验请求体不花钱：加 --dry-run
+```
+
+manifest 里每个 job 支持：`id / model / prompt / image(i2v单图) / images(r2v多图) / media(显式media直通) / video_url / resolution / duration / ratio / seed / no_extend / watermark / output`；并发取 `min(--concurrency, manifest.concurrency, 20)`（20 只是脚本代码里的保护值，不代表可用配额）；配额核实前一律传 `--concurrency 5`。
+
+- **`.hermes/scripts/` 与 `workflow/scripts/` 是受保护路径**（`PROTECTED_PATH_WRITE` 拦写入），新工具放项目工作目录（如 `huolong-guide/work/_tools/`）；要装进公共脚本目录需人工解锁。
+- **单条脚本的旧字段（2026-09-28 已修正）**：`build_input()` 原来 `wan3.0` 写 `input.image_url`、`happyhorse-*-i2v` 的 media 缺 `type`、`video_edit` 的 type 写 `"video"` —— 三处都已改为现行格式（`media` + `first_frame`/`reference_image`/`reference_video`），备份 `dashscope_video.py.bak-fieldfix-20260927`；实测 `build_input()` 四个模式输出均正确。批量器另有自建 `build_input_current()`，不依赖单条脚本。
+- **写受保护路径的闸盲点（2026-09-28 实测）**：`.hermes/scripts/` 写入被拦只在**命令文本里出现该路径**时生效；受保护路径写在**被执行的脚本内部**时，闸放行、放行条也不会被消耗（unlock 文件 `used` 仍为 false）。需要人工放行的改动，除人工确认外应自行校验写入结果与闸审计。
+
+### 参考图公网URL托管
+
+DashScope i2v/r2v 需要图片有公网可访问URL。新加坡机8899只绑127.0.0.1。
+**解法**：scp到广州机Caddy目录 `/home/ubuntu/public/`，用 `http://<GZ_HOST>/<file>.png`。
+
+```bash
+scp -P 2222 /local/image.png ubuntu@127.0.0.1:/tmp/image.png
+ssh -p 2222 ubuntu@127.0.0.1 'cp /tmp/image.png /home/ubuntu/public/image.png'
+# 验证: curl -s -o /dev/null -w "%{http_code}" http://<GZ_HOST>/image.png  # 返回200即可用
+```
+
+## 三、API格式（0826官方文档勘误，重要）
+
+### 统一格式：所有模型用 `input.media`，必须带 `type` 字段
+
+```json
+{
+  "model": "模型名",
+  "input": {
+    "prompt": "描述文本",
+    "media": [{"type": "类型", "url": "公网URL"}]
+  },
+  "parameters": {"resolution": "720P", "duration": 5}
+}
+```
+
+### media type 对照表（0826官方文档更新）
+
+| 模型 | 支持的type | 说明 |
+|:---|:---|:---|
+| wan3.0 | first_frame / last_frame / reference_image / reference_video / reference_audio / file / link | All-in-One，四模态合一 |
+| happyhorse-i2v | first_frame（有且仅有1张） | 仅首帧 |
+| happyhorse-r2v | reference_image（1-9张） | 多张参考图 |
+
+### wan3.0 media type 详细限制
+
+| type | 说明 | 限制 |
+|:---|:---|:---|
+| first_frame | 首帧图像，严格作为视频第一帧 | 最多1张 |
+| last_frame | 尾帧图像，严格作为视频最后一帧 | 最多1张 |
+| reference_image | 参考图像 | 最多10张，单张≤20MB |
+| reference_video | 参考视频 | 最多5段，总时长≤15秒，单文件≤100MB |
+| reference_audio | 参考音频（仅全能参考模式） | 最多5段，总时长≤15秒，单文件≤15MB |
+| file | 文件（docx/doc/xlsx/xls/pptx/ppt/pdf/txt/md） | 最多1个，不可与link同时输入 |
+| link | 网页链接（公开网页） | 最多1个，不可与file同时输入 |
+
+⚠️ `reference_xx`/`file`/`link` 类型和 `first_frame`/`last_frame` 类型**互斥**，不能在同一请求中混用。
+
+### wan3.0 素材指代规则
+
+- 图片、视频和音频**分别计数**，互不冲突
+- `图1`/`图片1` → input.media 数组中第1个 `reference_image`
+- `视频1` → 第1个 `reference_video`
+- `音频1` → 第1个 `reference_audio`
+- HappyHorse 用 `[Image 1]` 语法（中括号+首字母大写Image+空格+序号）
+
+### 踩坑过程（0825→0826）
+
+- `input.image_url`（字符串）→ 报 `Field required: input.media` ❌
+- `input.media`（字符串）→ 报 `Input should be a valid list` ❌
+- `input.media`（字符串列表 `["url"]`）→ 报 `Input should be a valid dictionary` ❌
+- `input.media`（对象列表 `[{"url":"url"}]`）→ HappyHorse 报缺 type 字段 ❌
+- `input.media`（对象列表 `[{"type":"first_frame","url":"url"}]`）→ **成功** ✅
+
+## 四、全参数速查
+
+### wan3.0
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---|
+| resolution | 480P/720P/1080P | 1080P |
+| ratio | adaptive/16:9/9:16/1:1/3:4/4:3/4:5/5:4/9:21/21:9 | adaptive |
+| duration | [2,30]整数；有视频输入时总时长≤30s；-1=智能时长 | 5 |
+| audio | true/false 输出是否含音频 | true |
+| prompt_extend | true/false 智能改写prompt | true |
+| watermark | true/false 水印 | false |
+| seed | [0,2147483647] | 随机 |
+
+### HappyHorse R2V
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---|
+| resolution | 480P/720P/1080P | 1080P |
+| ratio | 16:9/9:16/3:4/4:3/4:5/5:4/1:1/9:21/21:9 | 16:9 |
+| duration | [3,15]整数 | 5 |
+| watermark | true/false（文案"Happy Horse"） | true |
+| seed | [0,2147483647] | 随机 |
+
+### HappyHorse I2V
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---|
+| resolution | 480P/720P/1080P | 1080P |
+| duration | [3,15]整数 | 5 |
+| watermark | true/false | true |
+| seed | [0,2147483647] | 随机 |
+| 注意 | I2V 无 ratio 参数（跟随首帧图比例） | — |
+
+## 五、提示词公式（0826官方文档更新）
+
+> wan3.0 官方文档：`help.aliyun.com/zh/model-studio/wan3-video-generation-guide`
+> 完整提示词参考库：`references/wan3.0-prompts-reference.md`（11个官方示例全文）
+> HappyHorse 1.1 官方创作教程提示词模板：`references/happyhorse-1.1-official-prompts.md`（R2V因果链/I2V水墨分镜/T2V一段式，三组官方模板+结构拆解）
+> HappyHorse API参考：`help.aliyun.com/zh/model-studio/happyhorse-text-to-video-api-reference`
+
+### 文生视频（t2v）
+
+> 提示词 = 主体 + 场景 + 运动
+
+进阶：提示词 = 主体（主体描述）+ 场景（场景描述）+ 运动（运动描述）+ 美学控制 + 风格化
+
+### 图生视频（i2v）
+
+> 提示词 = 运动 + 运镜
+
+图已经确定了主体、场景与风格，提示词主要描述动态过程及运镜需求。
+
+### 参考生视频（wan2.7 r2v）
+
+> 提示词 = 参考指代 + 动作 + 场景 + 台词（可选）+ 背景音乐（可选）
+
+- 参考指代：用"图1""图2"指代上传的参考图，序号与上传顺序一致
+- 台词：写 `xx说：xxx` 模型保持台词不变；不写则模型自由发挥；写"无台词"则不生成
+- BGM：不写则模型自行发挥；写"无背景音乐"则不加
+
+### wan3.0 分镜格式（0826官方）
+
+> 每镜头4-6秒，时间戳标注，单次最长30秒多镜头叙事
+
+格式：`(0:00 - 0:03) 运镜：中景。画面：xxx。动作：xxx。氛围：xxx。`
+或：`[0-3秒：标题] 描述`
+
+每镜必写五要素：**运镜 + 画面 + 动作 + 细节 + 氛围**
+
+### wan3.0 有声视频台词写法（0826官方）
+
+- 在提示词里按「人物说：xxx」逐句写台词，每句附情绪，不用引号包台词（引号内的字容易被渲染到画面上，见第七节第 2 条），模型会自动生成配音
+- 语速：提示词里不写任何语速描述词，按字数卡 duration（ceil(字数÷5.5)）；情绪逐句标注（抱怨→急躁；疑问→尾音上扬）
+- ⛔ **交付前四条目视验收（2026-09-29 用户第三次重申，缺一条不算过）**：① 画面里**没有手机**（生成端人物手里不拿手机，屏内不直出 App 界面；App 界面一律后期贴片）② **贴的素材是动态的**（不是静止贴图）③ 念白**有情绪**（逐句语气，不是一flat到底）④ **不是平稳念稿**（靠逐句情绪，提示词不写任何语速词）。**后期/渲染/HF 环节同样按这四条验**，任一条不达标不得交付给用户。
+- ⛔ **交付前第五条（2026-09-29 火龙返工后加）：实念率**——目视验收看不出「43 字只念出 29 个」，必须量。判据与合格线见 `newmedia-operations/huolong-replica-template/SKILL.md`「🔒 六类返工的唯一权威口径」⑥，用 `huolong_six_checks.py readrate <段底片.mp4> --text "本段台词"`；**测量点固定在段底片**（没上 BGM、没 atempo 的那一版），成片上量会被 BGM 和变速带偏（实测同一内容量出 67% / 93% / 105% / 107% 四个数）。念不全（实念率<90%）→一律重生成补齐，**不许删字幕凑数**；>105% 视为转写不可信，要人耳复核。
+- ⛔ **物理卡点（2026-09-29 已实装）**：`workflow/scripts/_tools/dashscope_batch.py`（不在 `work/_tools/`，那是拷贝）提交前硬校验——台词段缺表演指令（`VOICE_HINT` 是 `any()`：有「配音：」**或**「语气」**或**「语速偏快」任一即过，所以按统一口径写「配音：音色…逐句语气…音量充足，不说任何多余的字」照样过）、出现「语速自然/手机屏幕显示」、提手机但没锁「手机屏幕不可见」、单段 duration>15 → **直接拒绝提交并报错**（不调用 API、不花钱），无绕过开关。另：闸的触发词其实**有**（`guard/skill_load_guard.py:40` 含「快乐马/wan3」、`node-entry-guard.py:110` 含 happyhorse-*-r2v），但实测**路由错**（快乐马被指到 video-production）且从没拦住过本条——所以工具层卡点仍必须保留。
+- ⛔ **禁止在 prompt 里写「语速自然」**（2026-09-28 实测教训）：这四个字等于让模型平着念，用户听感「跟死人一样」，整条素材得重做。必须写**正向表演指令**，只写四样：`配音：音色＋逐句情绪（如语气急躁、情绪外放）＋音量充足＋不说任何多余的字。`（不写任何语速、段首段尾、留白描述） **禁止再写「严格保持语速…」这类全覆盖句**——它和逐句情绪直接打架，实测会把情绪拉平。
+- **情绪按句定，不许一刀切（2026-09-29 用户定；语速部分已按统一口径⑤删除）**：语气要跟着台词的语用功能走——抱怨句→烦躁带气；疑问句→尾音上扬、半信半疑；推荐句→笃定热心；列举句→像顺口报出；结论句→干脆肯定、重音落在关键词。统一不变的部分只留：`音色` + `逐句情绪` + `音量充足` + `不说任何多余的字`（**别写「严格保持语速」这种全覆盖句，会跟逐句变化打架**）。
+- 声音描述模板：`配音与音效：背景为xxx，环境音有xxx。xxx声线说：台词，语气按句定（烦躁/疑问/笃定/轻快/干脆），音量充足，不说任何多余的字。`（不写「第X秒」逐句时码，补充裁定 14）
+- 可通过 `audio=false` 关闭声音
+- HappyHorse 无 audio 参数，声音纯靠 prompt 驱动
+
+### wan3.0 视频编辑触发词
+
+提示词中需包含编辑意图关键词：
+- `编辑视频` / `去掉` / `替换` / `改成`
+- ratio 建议 adaptive，duration 建议 -1（保持原视频宽高比和时长）
+
+### wan3.0 视频延长触发词
+
+提示词中需包含延长意图关键词：
+- `延长` / `延续` / `续写` / `向前延长` / `向后延长`
+- ratio 建议 adaptive（保持原视频宽高比）
+- 输入时长+输出时长总计≤30秒
+
+### 声音公式（wan2.7/wan2.6/wan2.5/wan3.0/快乐马通用）
+
+> 人声 = 角色说话的内容 + 逐句情绪 + 音色 + 音量充足 + 不说任何多余的字（不写语速、段首段尾描述）
+
+示例：一个男人在讲脱口秀，声音清亮。男人说：好好学习，天天向上，语气轻松。音量充足，不说任何多余的字。
+
+### 多镜头公式（wan2.7/wan2.6/wan3.0/快乐马通用）
+> ⚠️ **现行出片一律用写法 A**：只写「生成单镜头」，不带切镜关键词（补充裁定 37）；双人段两人始终同框、一左一右，不切单人（⑨）。以下分镜格式只作能力记录，快乐马出片不用。
+> **快乐马支持单段内多镜头切换**（0830更正，来源：Runware官方文档+GitHub案例库+fal.ai）
+> HappyHorse 1.1 直接从自然语言分镜提示词读取多镜头，单次最长15秒，音频跨切镜保持一条音轨。
+
+**英文分镜关键词格式**（Runware官方）：
+```
+Begin with a wide establishing shot... Cut to a medium shot... Shift to a close-up... Then a slow push-in... End on a wide static shot...
+```
+切镜触发词：`Begin with...` → `Cut to...` → `Shift to...` → `Then...` → `End on...`
+
+**中文分镜格式**（GitHub awesome-happyhorse-prompts 实测案例）：
+```
+分镜1（近景3秒）侧面跟拍[Image 3]的少女。两人起身行走，少女突然停下脚步翻了个白眼，说：xxx。
+分镜2（中景4秒）平视。少年凑近半步，压低声音说：xxx。
+分镜3（近景3秒）平视。少女抬手戳了戳他的胳膊，回怼说：xxx。
+分镜4（中景5秒）正面平视。少年瞬间蔫了，少女补刀说：xxx。
+```
+
+**Shot List格式**（fal.ai）：
+```
+Shot 1 (framing, 0-Xs): setup beat
+Shot 2 (framing, X-Ys): action beat
+Shot 3 (framing, Y-Zs): resolution beat
+```
+
+注意：不带切镜关键词的纯场景描述 = 单镜头，模型不自动切。切镜靠关键词触发。
+
+> 提示词 = 总体描述 + 镜头序号 + 时间戳 + 分镜内容
+
+示例：`镜头1[0-3秒]xxx，镜头2[3-6秒]xxx`
+单镜头控制：中文写"生成单镜头"，英文写"Generate single shot."
+
+## 六、参考图引用语法（三套不能混用！）
+
+| 模型 | 引用语法 | 示例 |
+|:---|:---|:---|
+| **HappyHorse R2V** | `[Image 1]` `[Image 2]` | `[Image 1]中身着红色旗袍的女性` |
+| **Wan3.0** | `图1` `图2` / `视频1`（图和视频分别计数） | `视频1抱着图3，在图4的椅子上` |
+| **wan2.7 r2v** | `图1` `图2`（wan2.7）/ `character1`（wan2.6） | `图1在图2里玩耍` |
+| **Seedance（火山）** | `@图1` `@图2` | `@图1 人物参考` |
+
+⚠️ `@图1` 是 Seedance 专属语法，阿里模型不识别。
+⚠️ `{台词}` 大括号是 Seedance 专属语法，阿里模型当普通字符处理。
+
+## 七、实测勘误（文档不写，来自大量调用）
+
+### 1. SD权重语法完全无效
+`(面部:1.3)` `(xxx:1.2)` 等 Stable Diffusion 权重语法 → 完全无效，当普通文本处理，偶发画面出现乱字。
+
+### 2. 英文双引号极易生成画面字幕
+`"台词"` 用英文双引号包裹的内容 → 极易把引号内文字渲染到画面上。如需写台词，用自然语言：`人物说：xxx` 或中文引号。
+
+### 3. 大括号不触发语音
+`{对白}` 不会触发语音生成，大括号是普通字符。这是 Seedance 专属语法，阿里模型不识别。台词写法：`人物说：xxx`。
+
+### 4. 负向提示词效果弱
+- HappyHorse 无 negative_prompt 参数
+- Wan3.0 无 negative_prompt 字段
+- 禁止条件优先写在正向提示词末尾，效果更好
+
+### 5. 不能上传外部音频驱动口型
+两个模型都不能上传外部 wav 音频文件驱动口型。只能依赖模型内部生成语音。Wan3.0 `reference_audio` 类型是参考音频（音色参考），不是口型驱动。
+
+### 6. R2V vs I2V 本质区别
+
+| 维度 | R2V（参考生视频） | I2V（图生视频） |
+|:---|:---|:---|
+| 图片角色 | **角色参考**（不锁首帧） | **视频第一帧**（首帧） |
+| 锁人物全程 | 不保证 | 不保证（只是起点） |
+| 参考图数量 | HappyHorse 1-9张 / Wan3.0最多10图+5视频+5音频 | HappyHorse仅1张 / Wan3.0 first_frame最多1张 |
+| 用途 | 多角色/多素材融合 | 从一张图开始生成视频 |
+
+**关键理解**：I2V的图片是视频的第一帧，但模型可以自由演化后续画面，不会全程锁定人物外观。R2V的图片是角色参考，模型参考其外观特征但不以它为首帧。
+
+### 7. 水印
+- HappyHorse i2v/r2v 默认带水印（右下角"Happy Horse"文案），`watermark` 参数默认 **true**，可设 false 关闭
+- Wan3.0 `watermark` 默认 **false**（不加水印）
+
+## 八、跨模型提示词适配铁律（0825用户三次纠正）
+
+从 Seedance 提示词改写到快乐马/wan3.0 时：
+
+1. ✅ **台词按「人物说：xxx」逐句列出，每句标情绪，不写逐句时码**（时码就是节奏和留白指令，违反⑤；旧「保留逐句时码」作废）
+2. ✅ **保留动作精确时码**（4.35秒躯干前压→4.5秒离座→5.0秒站直，不压缩为"第4.5秒起身"）
+3. ✅ **保留摄影机运动细节**（后退速度比、侧移换位、不跳切）
+4. ✅ **参考图只传人物参考图 + 1 张场景图**（复刻片垫参考片场景帧，原创片垫本条角色三视图）；不传闪屏图或屏内素材图，App 界面一律后期贴片
+5. ✅ 只去掉彩铅相关内容和不支持的负面词
+6. ✅ 快乐马时长3-15秒，段时长一律 ceil(字数÷5.5)，不按原时码截取（复刻片同样按字数算）
+7. ✅ 需要多张参考图用 r2v（最多9张），不用 i2v（单图）
+8. ✅ 提示词里必须逐张写明每张参考图的用途（锁人物/锁场景）
+9. ❌ **禁止粗化动作时码**（如把4.35→4.5→5.0三步压成"第4.5秒起身"）
+10. ❌ **禁止砍台词**
+11. ❌ **禁止漏引用场景图；禁止传闪屏图或屏内素材图**（App 画面一律后期贴片）
+
+## 九、真人参考图直出（0825用户定案）
+
+**用户明确指示：快乐马支持真人参考图，不需要彩铅三视图绕检。**
+
+- Seedance 2.0 Mini 有真人检测拦截，必须用彩铅三视图绕检
+- **DashScope（快乐马/wan3.0）无真人检测**，直接传真人视频帧/照片做参考图不触发拦截
+- 当原片角色彩铅图已删除/不可用时，直接从成片抽帧做参考图
+- **快乐马 i2v prompt 不写负面词**（HappyHorse 不支持 negative_prompt 参数）
+- 快乐马 i2v prompt 风格：纯画面描述 + 动作时码，不写 Seedance 那套「彩铅三视图还原真人照片级写实」绕检话术
+
+### 用成片帧做 i2v 参考图
+
+1. `ffmpeg -ss <秒> -frames:v 1 frame.png` 从成片抽帧
+2. 选人物清晰、姿态典型的帧
+3. scp 到广州机 Caddy 公开目录获取公网 URL
+4. 默认传给 happyhorse-1.1-r2v 做参考图（`reference_image`）；happyhorse-i2v / wan3.0 只在用户点名时才用
+
+## 十、计费
+
+### 原价（2026-09-21 官方模型页核对）
+
+**华北2（北京）** — 我们的脚本走 `dashscope.aliyuncs.com`，按这一档计费：
+
+| 分辨率 | happyhorse-1.1（快乐马） | wan3.0-video | wan3.0-video-prime |
+|:---|:---|:---|:---|
+| 480P | 0.45元/秒 | 0.30元/秒 | 原价更高（优速版） |
+| 720P | **0.90元/秒** | **0.60元/秒** | 同左 |
+| 1080P | 1.20元/秒 | 1.20元/秒 | 同左 |
+
+**新加坡（国际站）**：happyhorse-1.1 0.524594 / 1.049188 / 1.348956 元每秒；wan3.0-video 0.37471 / 0.74942 / 1.49884 元每秒。
+
+### 活动价（2026-09 限时）
+
+- **wan3.0-video 7折**：480P 0.21 / 720P 0.42 / 1080P 0.84 元每秒（国际站同活动至 2026-09-24 00:00 UTC+8）
+- **happyhorse-1.1 约6折**：720P 0.9 → 0.54 元每秒（36氪上线报道）
+- 百炼还有全模型通用抵扣包（低至 4.5 折），最终以控制台账单为准
+
+参考图数量不加价，只看分辨率+输出时长。单段 15 秒 720P 参考价：快乐马 13.5 元（折扣约 8.1 元）/ wan3.0 9 元（7折 6.3 元）。
+
+### 成本口径（用户二轮裁定第 11 条）
+
+旧的「5 秒视频折后成本对比表」（wan3.0 6 折／快乐马 4.5 折、720P 5 秒 0.28 元）已作废：折扣和上文活动价对不上，0.28 元也算错了（0.9×5×0.45≈2.03 元）。**成本一律以控制台账单实价为准**，并据此一次性补齐 `PRICES` 表；核实前只按上文原价估算（快乐马 720P 0.90 元/秒）。
+
+## 十一、三模型横向对比
+
+| 维度 | wan3.0-video | HappyHorse-1.1 | Seedance 2.0 Mini |
+|:---|:---|:---|:---|
+| 厂商 | 阿里·万相3.0 | 阿里·HappyHorse | 字节·豆包 |
+| t2v | ✅ | ✅ | ❌ |
+| i2v | ✅ media(type:first_frame) | ✅ media(type:first_frame) | ✅ reference_image |
+| r2v | ✅ 四模态合一 | ✅ (最多9张参考) | ❌ |
+| 分辨率 | 480P/720P/1080P | 480P/720P/1080P | 720P固定 |
+| 时长 | 2-30秒 | 3-15秒 | 4-15秒 |
+| fps | 30fps | 24fps | — |
+| 真人检测 | **无** | **无** | **有**(拦截真人照) |
+| 负向提示词 | 无（禁止条件写在正向提示词末尾） | 无（禁止条件写在正向提示词末尾） | 不支持 |
+| 多镜头 | ✅ All-in-One | ✅ 自然语言分镜 | ❌ |
+| 有声视频 | ✅ 原生(audio参数控制) | ✅ (prompt驱动,无audio开关) | — |
+| 视频编辑 | ✅ All-in-One(编辑触发词) | ✅ 独立接口 | ❌ |
+| 生成耗时(5s/720P) | ~3分钟 | ~1分钟 | ~2分钟 |
+| 成本(5s/720P) | 以控制台账单实价为准 | 以控制台账单实价为准（原价 4.5元） | 2.5元 |
+| 调用端点 | DashScope公共 | DashScope公共 | 火山引擎ARK |
+| SG连通 | SSH跳广州 | SSH跳广州 | 8899 relay |
+
+## 十二、官方curl样例（0826官方文档）
+
+### HappyHorse T2V（文生视频）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "happyhorse-1.1-t2v",
+  "input": {
+    "prompt": "一座由硬纸板和瓶盖搭建的微型城市，在夜晚焕发出生机。一列硬纸板火车缓缓驶过，小灯点缀其间，照亮前路。"
+  },
+  "parameters": {"resolution": "720P", "ratio": "16:9", "duration": 5}
+}'
+```
+
+### HappyHorse R2V（参考生视频，3张参考图）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "happyhorse-1.1-r2v",
+  "input": {
+    "prompt": "[Image 1]中身着红色旗袍的女性，镜头先以侧面中景勾勒旗袍修身剪裁与S型曲线，随即切换至低角度仰拍，捕捉她轻抬玉手展开[Image 2]中的折扇的同时，[Image 3]中的流苏耳坠随头部转动轻盈摆动的细节，最后推近至面部特写。",
+    "media": [
+      {"type": "reference_image", "url": "https://xxx/girl.jpg"},
+      {"type": "reference_image", "url": "https://xxx/fan.jpg"},
+      {"type": "reference_image", "url": "https://xxx/earrings.jpg"}
+    ]
+  },
+  "parameters": {"resolution": "720P", "ratio": "16:9", "duration": 5}
+}'
+```
+
+### Wan3.0 文生视频（有声视频）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "wan3.0-video",
+  "input": {
+    "prompt": "20秒21:9超宽银幕毛绒宇宙冒险片段，整体采用超精细毛绒材质..."
+  },
+  "parameters": {"resolution": "480P", "ratio": "adaptive", "duration": 20, "prompt_extend": true}
+}'
+```
+
+### Wan3.0 参考生视频（多图+视频交互）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "wan3.0-video",
+  "input": {
+    "prompt": "视频1抱着图3，在图4的椅子上弹奏一支舒缓的乡村民谣，并说道：今天的阳光真好。图1手中拿着图2，路过视频1，把手中的图2放到视频1旁边的桌子上，并说道：真好听，能不能再唱一遍。",
+    "media": [
+      {"type": "reference_image", "url": "https://xxx/girl.jpg"},
+      {"type": "reference_video", "url": "https://xxx/role2.mp4"},
+      {"type": "reference_image", "url": "https://xxx/object3.png"},
+      {"type": "reference_image", "url": "https://xxx/object4.png"},
+      {"type": "reference_image", "url": "https://xxx/background5.png"}
+    ]
+  },
+  "parameters": {"resolution": "720P", "ratio": "adaptive", "duration": 5}
+}'
+```
+
+### Wan3.0 视频编辑（改风格）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "wan3.0-video",
+  "input": {
+    "prompt": "将整个画面转换为黏土风格",
+    "media": [{"type": "reference_video", "url": "https://xxx/input.mp4"}]
+  },
+  "parameters": {"resolution": "720P", "prompt_extend": true}
+}'
+```
+
+### Wan3.0 视频延长（向后延长）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "wan3.0-video",
+  "input": {
+    "prompt": "将视频1向后延长，面包师端上刷好的面包，将刷子放到一旁，镜头跟随面包师，去斜后方的烤炉进行烤制",
+    "media": [{"type": "reference_video", "url": "https://xxx/input.mp4"}]
+  },
+  "parameters": {"resolution": "720P", "ratio": "adaptive", "prompt_extend": true}
+}'
+```
+
+### Wan3.0 参考文件生视频（PPT→视频）
+
+```bash
+curl --location 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis' \
+-H 'X-DashScope-Async: enable' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+-H 'Content-Type: application/json' \
+-d '{
+  "model": "wan3.0-video",
+  "input": {
+    "prompt": "一支高端智能眼镜产品广告...",
+    "media": [{"type": "file", "url": "https://xxx/glass.pptx"}]
+  },
+  "parameters": {"resolution": "480P", "ratio": "adaptive", "duration": 10, "prompt_extend": true}
+}'
+```
+
+### 查询任务结果（通用）
+
+```bash
+curl -X GET 'https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/api/v1/tasks/{task_id}' \
+-H "Authorization: Bearer $DASHSCOPE_API_KEY"
+```
+
+## 十三、跨镜一致性（多镜分段出片保持前后人物/场景一致）
+
+> 多镜分段出片时，每镜都是独立生成，模型不会记住上一镜的人物和场景。要前后一致，必须显式锁住三样东西：**人物外貌穿搭、场景环境、镜头节奏**（屏幕内容不进生成端，App 界面一律后期贴片）。
+
+### 快乐马（HappyHorse r2v 做法）
+
+1. **同一组参考图每镜都传**：人物参考图 + 1 张场景图（r2v 最多 9 张）；不传道具/屏幕素材图，App 界面一律后期贴片
+2. **提示词逐张绑定用途**：`[Image 1]中的年轻男性站在[Image 2]中的轻奢客厅里`——人物图锁外貌、场景图锁环境
+3. **固定 seed**：同 prompt + 同参考图 + 同 seed = 可复现，前后镜人物场景不漂移
+4. **快乐马不支持首尾帧接力**（i2v 仅单张首帧、r2v 全是静态参考），跨镜连续性只能靠「同一组参考图 + 固定 seed」保证
+5. **参考图必须逐张 MD5 校验**（文件名≠内容，翻车3次）
+
+快乐马跨镜模板参数：`{"resolution":"720P","ratio":"<RATIO>","duration":<DURATION>,"watermark":false,"seed":12345}`
+- `<RATIO>`：按用户当次要求填；用户没说时，整片含双人段就全片用 16:9（单人段也用 16:9，不加黑边或模糊底），纯单人片用 9:16。
+- `<DURATION>`：按 ceil(本段字数÷5.5) 填，单段不超过 15 秒；这里是变量，没有固定值。
+
+### wan3.0 做法（默认停用，用户点名才用；比快乐马多三件武器）
+
+1. **同参考图 + 固定 seed 基础盘**（同快乐马）
+2. **参考视频锁角色**：media 类型 `reference_video` 传角色视频，提示词 `视频1抱着图3...`——形象+声音一起锁
+3. **首尾帧接力（跨镜连续性最强）**：media 类型支持 `first_frame` / `last_frame`，镜2 首帧 = 镜1 尾帧，前后画面直接连续
+4. **参考音频锁音色**：`reference_audio`（音色参考，不是口型驱动）
+5. **prompt_extend 必须 false**：否则精确时码和锁定描述会被智能改写打乱
+
+wan3.0 跨镜模板参数：`{"resolution":"720P","ratio":"9:16","duration":10,"audio":true,"prompt_extend":false,"watermark":false,"seed":12345}`
+
+### 每镜提示词必须包含的三层锁定（两模型通用）
+
+1. **参考图绑定句**：`[Image 1]中的XXX站在[Image 2]的XXX里`（快乐马）/ `图1的XXX站在图2的XXX里`（wan3.0）
+2. **外貌锁定**：人物图特征原文引用（发型/服装/配饰，与图一致，不新增不删减）
+3. **场景锁定**：场景图特征原文引用（光线/陈设/色调）
+（已作废：道具/屏幕锁定。生成端不传屏幕素材，App 界面一律后期贴片）
+
+### 边界（文档没有，实测+参数层支持）
+
+- 快乐马能力上支持单段内多镜头切换（0830更正），但现行一律用写法 A：只写「生成单镜头」，不带切镜关键词（补充裁定 37）；双人段两人始终同框、一左一右，不切单人镜头（⑨）。一段能装下的内容不需要拆成多段独立生成。
+- ⚠️ **反例（2026-09-23 实拍翻车）**：提示词里写「一个连续物理镜头…」会把人物冻成摆件（罚站、表情僵）。按补充裁定 37，这句一律删掉、不写。现行写法 A：只写「生成单镜头」，不带切镜关键词，也不写分镜1/分镜2；双人段两人同框一左一右，不做正反打；人物要自然动，靠画面动作描述。
+- DashScope 无专门跨镜一致性 skill（Seedance 有尾帧接力 skill），分段出片的跨镜一致性靠同组参考图+固定seed
+- 跨镜连续默认靠快乐马「同组参考图 + 固定 seed」保证；wan3.0 首尾帧接力只在用户点名时才用
+
+## 十四、段不拆碎铁律（0831天行者三次纠正定案）
+
+**快乐马 r2v 单次最长 15 秒，能满时长就一段出完，禁止拆碎段。**
+
+> 此规则同样适用于 happyhorse-1.1-r2v 及 wan3.0-video。
+
+1. **能一段出完的不拆多段**：15 秒能装下的内容就一段 r2v，不用拆成 3 秒碎段独立生成
+2. **单段用写法 A**：只写「生成单镜头」，不带切镜关键词（补充裁定 37），一段内容一段出完，不需要拆成多段
+3. **duration 按台词字数算够**：duration = ceil(台词字数 ÷ 5.5)（单段 ≤15 秒），不问用户、不另设密度档（统一口径①；旧的 ÷4.5 和第十五节保守密度都作废）
+4. **禁止按 8 步公式逐句拆段**：8 步公式是台词结构骨架，不是分镜拆段依据。一个完整意群不该在中间硬切
+5. **只有超过 15 上限才拆段**：内容确实超时才拆，拆时按叙事弧分段（如 H 段剧情钩子一段、P 段口播一段），不按逐句拆
+6. **同段可多角色/多说话人（用户 2026-09-17 重申）**：一段 15 秒内可让多个角色各说各的台词（官方 R2V 示例即 1 主角+3 对手；GitHub 案例为少女与少年多分镜对话），用「人物说：xxx」逐句写清谁说什么、每句附情绪，音频仍是一条轨。**男女不同不是拆段理由**——不要因为「一女一男」就拆成两段（旧规则「多角色必须拆段」已废弃）
+
+> 教训：按 3 秒硬切 8 段 → 吞字 + 碎段多花钱 + 叙事断裂。合并成 2 段（H 段完整剧情弧 + P 段完整口播弧）才对。
+
+## 十五、台词/语音官方规则（HappyHorse Prompt Craft 实测指南，2026-09-17 查证）
+
+> 出处：`developer.aliyun.com/article/1742768`（HappyHorse Prompt Craft，基于 47+ 场景 / 100+ 次 A/B 实测）+ 官方创作手册
+
+**台词时长与密度（硬口径）**
+
+> ⚠️ **两套密度口径的关系（2026-09-29 定案，先读这段）**：本节的官方保守密度（≈2.6 字/秒）和第十四节第 3 条的 `÷4.5 字/秒` **差了将近一倍**，以前两条都写成「硬口径」，谁都能各挑一条说自己有依据，于是「字数超了」和「段数拆碎了」两种返工轮着来。
+> 现行唯一口径（统一口径① 2026-10-01）：**`duration = ceil(字数 ÷ 5.5)`**，单段 ≤15 秒；实念率低于 90% 一律重出（不改字数、不退密度档），>105% 要人耳复核。
+> 本节下面的官方保守密度（≈2.6 字/秒）和旧常规带 ÷4.5 **都已作废**，只作历史记录。
+> 实念率的定义、测量点和合格线只有一处权威：`newmedia-operations/huolong-replica-template/SKILL.md`「🔒 六类返工的唯一权威口径」⑥。本节不再自设合格线。
+
+- 时长公式：duration = ceil(字数 ÷ 5.5)，单段 ≤15 秒（旧的「÷4×1.2 + 缓冲」作废）
+- ~~兜底密度上限 2.6 字/秒~~（已作废：实念率不达标一律重出，不压字数、不退档）
+- **说话人句数不限**，只在话轮真的换人时才换人，禁止机械「一人一句」；双人段必须你来我往互相说（多人对白按「人物说：xxx」逐句列出并附情绪，不用时间码分段）
+- FOOTER 必写硬约束句：**「人物口型与台词自然同步，每句台词必须完整念出不省略」**
+- 台词写法统一为 `人物说：xxx`，逐句列出并附情绪（如「男生说：xxx，语气急躁」）；旧的 `[角色/语气/…]` 标签式（时间码分镜内）和英文双引号写法作废（违反⑤和第七节第 2 条）
+- （已作废：无台词段沉默占位属于静默留白指令，违反⑤）无台词片默认不做，用户点名才做，时长照参考片（二轮第 23 条）
+
+**诊断（不念台词 / 口型不同步 / 吐字发错）**
+1. 核对 duration＝ceil(字数÷5.5)；2. 砍掉入场动作描述；3. 在画面描述里写「张口/嘴唇微动」（不得夹在台词里）；4. 实念率<90% 直接重出
+
+**⚠️ 实测踩坑（2026-09-17）**：台词超密度时模型念到句尾就糊——「提现」被读成「提赚」、「攒够」读成「攒购」，同一词在不同段读法还不一样（不是字幕写错，是配音飘）。取证法：ASR 逐字回读对照台词本。解法：duration 按 ceil(字数÷5.5) 卡够 + 补 FOOTER 约束句；连续两次实念率 <90% 才按二轮第 3 条拆句或换易念错的词（提现话术 4 条不改）；句数不限。
+
+**⚠️ 2026-09-22 更正**：降密度不是万能药——「提现」在**达标密度、单句、带读音提示**下仍念错（4/4）。含「提现」的段落按下条现行口径处理（台词不改、不拆 wan3.0）；早期“直接换 wan3.0”的口径已作废。
+
+**（历史记录，已被用户二轮裁定第 3 条覆盖）** 2026-09-22 曾改用同音字占位（提现→提线、签到→千到等）。**现行口径：台词默认一字不改**，只有两种例外：① 生成端被敏感词拦截时，对高危字做同义替换；② 连续两次实念率 <90% 时，可拆句或换易念错的词。**提现话术 4 条、卖点词、「不花钱看全集」永远不改**（不得写成「提线/千到」）。仍然不为「提现」拆 wan3.0，也不加拼音读音标注。
+
+## 台词准确性与口型同步硬约束（用户 2026-09-22 指定，所有 happyhorse 提示词必带）
+
+写快乐马（happyhorse r2v）提示词时，**这段必须原样附在台词之后，不得删改**（2026-10-01 按⑤删去停顿/呼吸/延音/收尾等节奏和留白描述）：
+
+```
+[台词准确性与口型同步约束]
+所有台词必须严格按照提供的剧本逐字、逐句、按原顺序说出。完整保留每个字词和每句标注的情绪，不得改写、翻译、遗漏、添加、替换、调换顺序、重复或合并台词。
+每名角色只能说分配给自己的台词，不得串台、抢台词或交换说话人。没有台词的角色全程保持安静，嘴部自然闭合或静止，不得发出额外人声。
+每个字音和音节必须与对应的嘴形、下颌运动、舌部动作、面部肌肉精确同步。口型必须与声音同时开始、同时结束，不得出现提前、延迟、漂移、错位或无声张嘴。
+各角色声线保持清晰区分（不要写"严格保持语速"这类全覆盖句，情绪按句内标注走）。如果画面动作与台词发生冲突，优先保证台词内容、说话人归属、音频时序及口型同步准确。
+不得生成字幕、额外对白、背景人声、即兴台词、重复声音或画外音。
+```
+
+落地：`huolong-guide/templates/nightclub_koubo_2x/spec/frozen_script_spec.py`（冻结模板）与各工程 `script_spec.py` 的 `build_prompt()` 里以 `LIP_CONSTRAINT` 常量插入。
+
+### 手机屏素材（2026-09-22 实测；**整节已作废，只作历史记录**）
+> 现行口径（⑨⑬、补充裁定 23）：生成端不喂 App 截图，人物手里不拿手机，屏内不直出 App 界面；App 界面一律后期贴片——非提现页贴右侧，高占 60–65%、宽占 22–25%，可压身体、不压脸；提现档位页按 528×240 @ x=640 y=380 放。
+- （历史）曾要求喂高清功能页截图（宽 ≥1000px）：喂 340×460 的小截图，模型会**自创界面**（实测 A_S1 出成音乐歌单页/日历页）；换 1143×2265 的剧库截图后画面内容才对得上。
+- 横版截图（如 1542×700 的档位页）塞竖屏手机屏会变形，优先用竖屏截图。
+- （已作废：画面里不出现亮屏或手机正面，界面走后期贴片）抽帧核验时手机屏要**朝镜头**：实测有段落手机背对镜头、屏幕完全不露（同 prompt 不同 seed 结果不同），必须逐帧看图。
+
+读音提示**不要插进台词句子中间**：实测「预约（yù yuē）」会让模型把这个词念两遍（A_S3 出「预约预约」）；只在台词后用独立标注行提示，删掉就地插拼音后复测 100%。拼音本身不会被念出来（安全）。
+
+**DataInspectionFailed 拦截**：提示词里出现「提现」等敏感词 + 拼音标注段落会被阿里云文本内容安全拦（`Green net check failed for text`）。修法是去掉额外拼音块（`NO_EXTRA=1`），台词本身不变即可过。
+
+（历史记录，已作废：现行做法是不加任何读音标注）2026-09-22 曾规定读音提示只放在台词之后、禁止插进台词正文；当时 `annotate()` 改为原样返回，只走 `read_annot()` 追加行（现已不再启用 `read_annot()`）：
+
+1. **台词正文不标注**（就地插入会让模型把词念两遍）
+2. **台词后追加一行**：`读音标注（括号内拼音只作标注，绝对不要把拼音念出来；每个字按标注念准）：科幻（kē huàn）；悬疑（xuán yí）`
+3. > ⛔ **读音标注流程已废弃（2026-09-22 用户定案）**：现行做法是**不加任何读音标注**，台词默认一字不改（二轮第 3 条；旧的「同音字占位」也作废）——快乐马加标注实测把邻近词读错（「开会员」→「开活源」）。新口径覆盖下述 1–4 条，下述流程只作历史记录，不要再启用 `read_annot()`。
+>
+> （历史记录）**覆盖 12 词**：提现/科幻/玄幻/悬疑/签到/火龙币/解锁/攒/漫剧/预约/双列/福利（`READ_ANNOT` → `annotate()` / `read_annot()`）
+4. 落地三处：工程 `script_spec.py` + `work/_tpl_selftest_*/script_spec.py` + `templates/*/spec/frozen_script_spec.py`
+
+**（历史记录，已作废：现行不加读音标注，台词默认不改）实证：长句里同音字念歪，当时靠「台词用顿号切分 + 标读音」解决**——A_S4「涵盖玄幻科幻都市悬疑冒险」原被念成「旋渔/旋渝」(yí→yú)，第 3 次改顿号分隔后 ASR 音节一致度 100%。
+
+## 视频里的 AI 标识（2026-09-22 查证）
+
+三层，别混：
+
+| 层 | 是什么 | 可控性 |
+|:---|:---|:---|
+| 画面水印 | `watermark=true` 时右下角固定「AI生成」字（wan3.0）/「Happy Horse」（快乐马） | ✅ 参数控制，生产一律 false |
+| 文件隐式标识 | 源片 MP4 元数据里被写 `AIGC={"Label":"1","ContentProducer":"001191330106MA2CFLDG4R10001",...}` | ❌ 关不掉，**快乐马和 wan3.0 都写** |
+| 平台层 | 抖音《内容标识使用规范》：第三方 AI 工具生成的内容发布时必须声明「内容由AI生成」；平台会读元数据隐式标识自动挂牌 | 发布端勾选 |
+
+- 隐式标识在**后期合成（ffmpeg/HF）后会被丢掉**——要保留得加 `-map_metadata`。已交付成片实测：只剩 `encoder=Lavf...`。
+- 合规动作：源片留档保留隐式标识；发布时按平台要求勾选 AI 声明，**不得删改平台加的 AI 标识**。
+- 优矩 brief 只提一句「带水印的素材必须打码，最好不用」，没提 AI 标识。
+
+## 踩坑
+
+- **happyhorse-1.1-r2v 对「提现」二字系统性念错（2026-09-22 实测 4/4，不可靠提示词救）**：读成 券/全/炫/卷（同一句四种不同错法）。加读音提示（提现 xiàn）无效、拆成 3 秒短句无效、压到官方达标密度（2.43 字/秒、单句 7 秒）无效 → **根因是该模型语音引擎对「现(xiàn)」的系统性发音缺陷，不是密度/句长/提示词问题**。同一句 + 同一组参考图换 **wan3.0-video 一次念对**（`media: reference_image` + `audio:true` + `prompt_extend:false`）。**含提现话术的段落一律走 wan3.0-video**（**已作废**：不再为提现拆模型，也不加拼音标注；台词按二轮第 3 条默认一字不改，提现话术不得写成「提线/千到」）。取证法：本地 `faster-whisper`（small + medium 双模型）交叉验证 + DashScope ASR，别只信一个 ASR——三个引擎都听不出正确词才能判定是「模型真念错」。wan3.0 副作用：会自行加台词（本次多念一句旁白），提示词必须显式写死「除上述台词外不得添加任何台词、旁白或画外音」。
+- **media 必须带 type 字段**：`[{"url":"..."}]` 缺 type 会报错。必须写 `[{"type":"first_frame","url":"..."}]`。0825踩坑三次：string→list→list of dicts→带type才成功。
+- **旧格式 image_url 已废弃**：wan3.0 旧记录写 `input.image_url`（字符串）是旧格式，官方已统一到 `input.media`。
+- **HappyHorse/wan3.0 官方文档已更新（0826）**：wan3.0 有独立用户指南页（`wan3-video-generation-guide`），HappyHorse 有4个API参考子页面。模型均仍在百炼平台可调。
+- **快乐马能生成声音（0826更正）**：之前记录"快乐马不支持有声视频"是错误的。快乐马能在提示词里写台词和声音描述来生成配音，只是API没有独立 audio 参数控制开关，声音纯靠 prompt 驱动。
+- **wan3.0 支持视频编辑和延长（0826新增）**：不再是"wan3.0不支持视频编辑"，All-in-One模型通过编辑触发词（"编辑视频""去掉""替换""改成"）和延长触发词（"延长""延续""续写""向前/向后延长"）自动路由。
+- **新加坡直连被墙**：必须 SSH 到广州执行 curl。8899 relay 丢 X-DashScope-Async header。
+- **prompt_extend 默认 true**：会自动改写简短提示词，不想被改写设 false。
+- **（已作废，按统一口径⑨⑬：App 界面一律走后期手机贴片，贴右侧、高 60–65%、宽 22–25%、允许压人；提现档位页按 528×240 @ x=640 y=380）手机屏内容不要后期贴屏（2026-09-17 旧定案）**：需要手机屏里显示内容时，**生成时就把素材当参考图喂进去**——闪屏页/App界面截图作为 `[Image N]`，提示词写「手机屏幕里显示[Image N]的闪屏页，屏幕有玻璃反光和轻微亮度变化」。用户原话：「闪屏页直接用方法2，视频生成的时候喂参考图；那个生成后贴屏的没用」。后期光流跟踪贴屏方案已废弃，对应 skill（phone-screen-overlay-tracking / screen-overlay-tracking）已删。
+- **HappyHorse 默认带水印**：watermark 默认 true，要关水印显式设 false。wan3.0 默认 false 不带。
+- **wan3.0 不在 /models 列表**：但实测能调通，靠实测确认能力。
+- **英文双引号会渲染到画面**：写台词用 `人物说：xxx` 不用 `"xxx"`。
+- **SD权重语法无效**：`(xxx:1.2)` 不加权，当普通文本，偶发画面乱字。
+- **不能外部音频驱动口型**：reference_audio 是音色参考不是口型驱动。
+- **help.aliyun.com 全JS渲染**：jina reader 抓不到正文。用广州机 curl + Python 剥 HTML 标签。
+- **快乐马支持单段多镜头**（0830更正）：之前记录"快乐马不支持多镜头语法"是错误的。Runware官方文档、GitHub案例库、fal.ai均有明确文档和实测案例。用自然语言分镜格式即可在单段15秒内切镜头（只作能力记录；现行出片用写法 A，只写「生成单镜头」，见补充裁定 37）。
+- **付费调用授权（用户二轮裁定第 5 条，覆盖旧「必须等用户说『跑』才动」）**：机器人通道**全自动**出片——先试跑一段，报一次效果和预估费用，再批量，不用等「跑」字；生图超过 10 张也不审批，只提前报数量和费用。用户喊「停」时，本地进程和未提交的步骤立即停，已提交的付费任务不取消。

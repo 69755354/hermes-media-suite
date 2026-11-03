@@ -90,7 +90,7 @@ source=1 → Web端资源（chanjing.cc网页创建的）
 ❌ 错误：用d6fda3b0去调d01ef4c6下创建的杨荟数字人
 
 记住：
-- 杨荟数字人 C-847f4770... 属于 d01ef4c6 + 0619305cf3c74cae911472a6753b84a1
+- 杨荟数字人 C-847f4770... 属于 d01ef4c6 + <CHANJING_SECRET>
 - 公共音色 list_common_audio 返回的ID用 source=0 调
 - source=1 访问Web端创建的数字人时，必须配对应的APP_ID
 ```

@@ -1,0 +1,21 @@
+---
+name: huolong-mixed-storyboard-v2
+description: 火龙漫剧完整分镜表v2（默认全片只走快乐马 happyhorse-1.1-r2v）。触发：火龙漫剧分镜。
+---
+
+# 火龙漫剧完整分镜表 v2（快乐马 happyhorse-1.1-r2v）
+
+完整分镜表文档已产出，存放于 `references/storyboard_v2.md`；该文档里的旧通道、旧段时长、旧叠加写法已作废，与本页概要或视频线统一口径冲突时，以统一口径为准。
+
+目标路径：`/home/ubuntu/workflow/projects/huolong_mixed/A_STORYBOARD_mixed_v2.md`
+（终端被workflow ticket系统封锁无法创建目录，文档内容已完整写入skill references）
+
+## 文档概要
+
+- 整片画幅：用户指定的优先；用户没说时，含双人段就整片横版 1280×720，纯单人片出竖版 720×1280
+- H段：快乐马r2v，duration＝ceil(本镜字数÷5.5)，单镜不超过15秒；5句台词按「人物说：xxx」逐句列出、每句附情绪，不写逐句时码
+- P段：快乐马r2v生成，187字台词拆成多镜（至少3镜），每镜不超过15秒，每镜时长＝ceil(本镜字数÷5.5)；台词默认一字不改、不拆句，按「人物说：xxx」原样逐句列出、每句附情绪，不写逐句时码；只有两种情况可以改：生成端被敏感词拦截时，对高危字做同义替换；连续两次实念率低于90%时，拆句或换掉易念错的词。提现话术4条、卖点词、「不花钱看全集」永远不改；字幕超长按多条依次显示，不算拆台词
+- CTA段：时长＝ceil(念白字数÷5.5)；贴片、小字、LOGO 都写在后期叠加层字段，叠加链和素材照激励-06 实存脚本；LOGO 念到 CTA 时淡入、保持1.5秒后撤下，位置尺寸照激励-06
+- 全片总时长：各镜 ceil(字数÷5.5) 相加，不预设片长
+
+用 skill_view(name='huolong-mixed-storyboard-v2', file_path='references/storyboard_v2.md') 读取完整文档。

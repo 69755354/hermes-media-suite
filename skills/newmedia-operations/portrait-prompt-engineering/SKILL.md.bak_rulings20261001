@@ -1,0 +1,161 @@
+---
+name: portrait-prompt-engineering
+description: |-
+  Write Seedream/Stable Diffusion/etc. portrait prompts in the user's preferred style.
+  Five-layer fixed-weight structure + natural paragraph style + concrete descriptions only.
+---
+
+# Portrait Prompt Engineering (User's Style)
+
+## Core Principles
+
+### 1. Five-Layer Fixed Structure (weight front→back, each layer independent, no overlap)
+
+| Layer | Name | Weight | What it controls |
+|:-----|:-----|:-------|:----------------|
+| 1 | 主体基础层 | Highest | Face, age, ethnicity,五官, hair, base temperament |
+| 2 | 肤质妆容层 | 2nd | Skin texture, pores, oil, fine lines — positive only, no negatives |
+| 3 | 体态情绪穿搭层 | 3rd | Pose, expression, clothing, accessories, body |
+| 4 | 镜头光影构图层 | 4th | Camera angle, focal length, light direction, depth of field |
+| 5 | 场景氛围画质层 | Lowest | Environment, color tone, film grain, aspect ratio |
+
+**Negative Prompt** — standalone module, collects ALL forbidden elements. Positive prompt should NEVER contain negative statements.
+
+### 2. Writing Style (Mandatory)
+
+- **Natural paragraph flow** — not comma-separated keyword lists
+- **Semicolons and periods** to organize logical groups
+- **Concrete, executable descriptions only** — AI cannot understand abstract concepts like "邻家感", "温柔气质", "真实感", "自然不极致精致"
+- **Negative uses "无" sentence pattern** — e.g. "无塑料假皮肤，无重度磨皮"
+- **Be specific about what you WANT**, not just what you don't want
+
+### 3. Abstract words to NEVER use (AI cannot execute)
+
+| Don't write | Instead write | Reason |
+|:-----------|:-------------|:-------|
+| 邻家气质 | 校园风格，非网红精致路线 | AI无法理解「邻家」 |
+| 五官自然不极致精致 | 五官比例标准/普通 | AI无法量化「不极致」 |
+| 温柔/优美/柔和 | 直接描述具体特征，或省略 | 主观形容词无效 |
+| 真实感/质感 | 写具体特征：毛孔、油光、细纹 | 太宽泛 |
+| 生活化 | 日常自然光线下的XX环境 | 抽象 |
+| 像身边认识的女孩 | ❌ 直接删 | AI无法理解 |
+| 身材曲线柔和流畅 | 腰臀比例自然，曲线不过分夸张 | 抽象 |
+| 松弛温柔浅笑 | 松弛浅笑 | 删「温柔」 |
+
+### 4. Known Model Bias — Text Alone Can't Fix
+
+When the following fails despite correct prompts, the model's training data bias is stronger than text. Switch to image-to-image with a reference photo.
+
+| Issue | Model | Strategy |
+|:------|:------|:---------|
+| ❌ 唇色偏亮粉/荧光 | Seedream 4.5 | 正向写「自然淡玫瑰粉色，阴影不偏紫不发灰」+ 负向「无唇色过艳无荧光唇色」。拉不动就垫图生图 |
+| ❌ 全身像俯拍 | Seedream 4.5 | 需要在L1+L4+负向**三层同时**约束。只在某一层写无效 |
+| ❌ 生成标准美女脸 | 所有模型 | 文生图天花板。要稳定输出特定长相→必须图生图垫参考照 |
+
+### 5. Five-Layer Template (User's Definitive Version — 2026-07-21)
+
+Copy and fill per layer. Concatenate as LAYER1 + LAYER2 + LAYER3 + LAYER4 + LAYER5 with periods or newlines between.
+
+```
+LAYER1="[年龄]岁[人种]女生，身高约[身高]cm，柔和鹅蛋偏瓜子脸，下颌线条柔和无棱角。[眼型逐一描述]；[鼻型逐一描述]；[唇型]；[眉型]。[发色]及[长度][卷度]发，[刘海样式]，校园邻家气质，非网红精致长相，五官比例标准，松弛浅笑，肢体姿态自然放松"
+
+LAYER2="近乎素颜，无厚重粉底，保留原生肤色不均、自然皮肤纹理，清晰可见毛孔、细小绒毛、皮下散射；自然唇纹、轻微眼角细纹，不遮瑕，保留原生皮肤油脂反光，发丝通透富有光泽。健康均匀暖调肤色，嘴唇呈现自然淡玫瑰粉色，阴影区域不偏紫、不发灰"
+
+LAYER3="白色蕾丝边细吊带方领内搭，浅底色碎花A字短裙，裸色细带高跟凉鞋；佩戴细项链与小巧耳钉，腰臀比例自然，身材曲线不过分夸张，肩颈线条舒展"
+
+LAYER4="严格正面平视机位，镜头中心与人物眼睛处于同一高度，拍摄者站在人物正前方，手机或相机不举高，不从人物上方拍摄，不使用斜俯拍角度。[全身版：人物全身自然站立 / 半身版：胸部以上半身构图]，窗边45度侧自然光，面部有柔和明暗层次和真实阴影，浅景深，背景轻微虚化"
+
+LAYER5="室内日常门店环境，拍摄者与人物保持同一水平高度。富士胶片细腻颗粒，85mm定焦镜头实拍原图，未经后期精修，服装面料纹理清晰。画面无任何文字、水印、logo、多余杂物"
+```
+
+### 6. Negative Prompt Template (Final)
+
+```
+无塑料假皮肤，无重度磨皮，无零瑕疵完美肌肤，无网红美颜滤镜，无过度锐化，无流水线AI美女，无浓妆，无肢体畸形，无五官扭曲，无俯拍，无仰拍，无斜拍，无高机位拍摄，无低机位拍摄，无极端视角，无僵硬刻意假笑，无卡通、二次元、CG、油画插画风格，无蜡像质感，无过度精修，无嘴唇发黑，无唇色暗沉发紫，无面部灰斑
+```
+
+## References
+
+See `references/seedream-final-prompt-20260721.md` for the user's definitive seedream prompt (fully filled template).
+See `references/character-sheet-prompts.md` for the通用版/小鹿专用版 四视图设定稿 templates (both正向+负向+参数).
+
+## Pitfalls
+
+- AI cannot understand abstract words — test every adjective against "can a machine execute this?"
+- Five-layer weight is real — don't put critical instructions in LAYER5 and expect them to work
+- Negative prompt MUST use "无" format, not "不要" or "禁止"
+- Eye-level angle needs reinforcement in BOTH LAYER1 and LAYER4 — one layer alone is not enough for Seedream
+- **Full-body vs Half-body switch:** when changing from full-body to half-body (e.g. user says "脸太小了"), delete ALL of: 身高 from LAYER1, 下半身裙+鞋子 from LAYER3. Change LAYER4 from 全身版 to 半身版. Keep LAYER2 unchanged.
+- If a constraint (like "no 俯拍") keeps failing despite being in the prompt, the model's training data bias is stronger than the text — switch to image-to-image with a reference photo
+- **NEVER swap reference images without asking the user.** Different reference images produce different people. If a图生图 fails, report the failure and ask which image to use — don't pick another one yourself.
+
+### 7. 图生图 Reference Image Rules
+
+**Workflow:**
+1. Upload image to ARK: `POST /api/v3/files` with `purpose=user_data` → get `file-xxx` ID
+2. Pass ID to `image_list` parameter in Seedream API call
+3. Only 1 reference image per call — multiple images confuse the model
+
+**Known Seedream 4.5 图生图 Limitations (confirmed across 4+ attempts):**
+
+| What it CAN lock | What it CANNOT lock |
+|:----------------|:--------------------|
+| Gender ✅ | Specific hairstyle (卷→直) ❌ |
+| General ethnicity ✅ | Exact facial features (神似但不同) ❌ |
+| Body type (tall/slim) ✅ | Clothing texture & patterns ❌ |
+| Outfit type (dress/skirt/shoes) ✅ | Hair color nuance ❌ |
+| | Age precision ❌ |
+
+**Diagnosis path when output doesn't match reference:**
+1. First check: did the model get gender wrong? → Try stronger gender constraint in prompt
+2. Second: ethnicity/race mismatch? → Add explicit "东亚" to prompt
+3. Third: facial features drifted? → This is model limitation. Use different tool (not Seedream) for character-consistent outputs
+
+**NEVER do:** silently swap to a different reference image when the first attempt fails. Always tell the user what happened and ask which image to use next.
+
+### 8. API vs App Discrepancy (Seedream 4.5)
+
+ARK API (what I use) vs 豆包App (what the user uses) are NOT the same:
+
+| Feature | ARK API | 豆包App |
+|:--------|:--------|:--------|
+| Face protection/lock | ❌ None | ✅ Built-in |
+| reference_strength | ❌ Not supported | ✅ Available |
+| cfg_scale | ❌ Not supported | ✅ Available |
+| style_type (photorealism) | ❌ Not supported | ✅ Available |
+| Sampling steps | ❌ Not supported | ✅ Available |
+| Creative enhancement toggle | ❌ Not supported | ✅ Available |
+| Result quality (same prompt) | ⭐⭐ | ⭐⭐⭐⭐⭐ |
+
+**Conclusion:** For character-consistent outputs (三视图/四视图/角色设定稿), tell the user to use 豆包App with the prompt. API裸调 cannot match App quality for face-locked generation.
+
+**ARK API supported parameters only:**
+`model`, `prompt`, `negative_prompt`, `image_list`, `size` (format: `WIDTHxHEIGHT` like `2560x1440`, NOT colon-separated), `n`, `watermark`
+
+### 9. 图生图 API Call Checklist (always include ALL of these)
+
+```
+☐ Upload ref image → get file-xxx ID (POST /api/v3/files, purpose=user_data)
+☐ Build JSON payload with ALL fields:
+   - model
+   - prompt
+   - negative_prompt (ALWAYS include — user got angry when I forgot this)
+   - image_list: [file-xxx]
+   - size
+   - n: 1
+   - watermark: false
+☐ Call POST /api/v3/images/generations
+☐ Download result with curl
+☐ Run vision_analyze to VERIFY the output before showing to user
+```
+
+### 10. Image Delivery Rules (User WX)
+
+```
+① 优先直接发图片/视频（微信原生发送）
+② 直接发不了时 → 上传到外部可访问URL，发纯文本链接
+③ ❌ 绝对禁止发服务器内部路径（如 /home/ubuntu/...）
+④ ❌ 绝对禁止发MEDIA路径
+⑤ 发链接时禁止附带任何标点符号（句号/括号/引号等），链接独立一行纯文本发送
+```
+

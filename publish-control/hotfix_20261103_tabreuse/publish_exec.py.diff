@@ -1,0 +1,82 @@
+--- /tmp/rev/prev_publish_exec.py	2026-11-03 21:58:56.703029595 +0800
++++ /home/ubuntu/workflow/projects/publish_control/hotfix_20261103_tabreuse/files/publish_exec.py	2026-11-03 22:06:25.750393405 +0800
+@@ -510,6 +510,17 @@
+     return parsed.hostname == "creator.douyin.com"
+ 
+ 
++def _host_of_url(url):
++    """Hostname for tab bookkeeping; empty for blank/unparsable pages."""
++    text = str(url or "").strip()
++    if not text or text == "about:blank":
++        return ""
++    try:
++        return (urlparse(text).hostname or "").lower()
++    except Exception:
++        return ""
++
++
+ def _creator_page_rank(page, preferred_url=""):
+     url = _page_url_value(page)
+     if preferred_url and url == preferred_url:
+@@ -3326,12 +3337,61 @@
+                        errors=result["errors"])
+         return result
+ 
++    #: hosts this program itself drives; a stray duplicate there is ours
++    AUTOMATION_HOSTS = ("creator.douyin.com", "www.xingtu.cn")
++
++    def _close_duplicate_site_pages(self, hosts=None):
++        """Keep at most one tab per automation host and leave every other tab.
++
++        Every run used to launch Chrome with its target URL, so the already
++        running instance opened one more window each time; runs that failed
++        before the fill stage never cleaned up.  Only the hosts this program
++        drives are touched -- the customer's own tabs stay open.
++        """
++        result = {"kept": {}, "closed": [], "errors": []}
++        try:
++            context = self._context()
++            pages = list(getattr(context, "pages", None) or [])
++        except Exception as exc:
++            result["error"] = type(exc).__name__ + ": " + str(exc)
++            return result
++        current = getattr(self, "_page", None)
++        for host in tuple(hosts or self.AUTOMATION_HOSTS):
++            same = [page for page in pages
++                    if _host_of_url(_page_url_value(page)) == host]
++            if len(same) <= 1:
++                if same:
++                    result["kept"][host] = _page_url_value(same[0])
++                continue
++            keep = next((page for page in same if page is current), same[0])
++            result["kept"][host] = _page_url_value(keep)
++            for page in same:
++                if page is keep:
++                    continue
++                url = _page_url_value(page)
++                try:
++                    page.close()
++                except Exception as exc:
++                    result["errors"].append({
++                        "url": url,
++                        "error": type(exc).__name__ + ": " + str(exc),
++                    })
++                else:
++                    result["closed"].append(url)
++        if result["closed"] or result["errors"]:
++            self._progress("page.cleanup.tabs", **result)
++        return result
++
+     def close(self):
+         if getattr(self, "_staged_dir", None) is not None:
+             self._staged_dir.cleanup()
+         self._unregister_upload_request_listener()
+         self.finish_publish_observation()
+         try:
++            self._close_duplicate_site_pages()
++        except Exception:
++            pass
++        try:
+             self._pw.stop()
+         except Exception:
+             pass

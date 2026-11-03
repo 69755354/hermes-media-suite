@@ -63,7 +63,7 @@
 工厂零影响，才敢切。切法：删 drop-in / 改环境变量 → `systemctl daemon-reload` → restart → 重测硬模式三用例。
 
 **凭据裸奔是第二层真相**：/home/ubuntu/.env 权限 664（ubuntu 组可读）+ helper_api.py 第5行
-`AK = "ark-9af4f039-..."` 明文硬编码（文件 644 root 可读）= agent 拿 key 直调火山 API，
+`AK = "<ARK_API_KEY>"` 明文硬编码（文件 644 root 可读）= agent 拿 key 直调火山 API，
 任何本地闸都碰不到。**接口下沉闸只堵「走本地服务」的路，堵不了「拿 key 直调」——要连凭据一起收口**
 （key 移出硬编码 + .env 改 600 root + 脚本改走 root 代理读凭据），才是完整三层。
 

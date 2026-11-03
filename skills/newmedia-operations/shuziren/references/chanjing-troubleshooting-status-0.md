@@ -13,7 +13,7 @@ Token有效期1天。获取新token：
 ```bash
 TOKEN=$(curl -s --max-time 10 "https://open-api.chanjing.cc/open/v1/access_token" \
   -H "Content-Type: application/json" \
-  -d '{"app_id": "d01ef4c6", "secret_key": "0619305cf3c74cae911472a6753b84a1"}' | \
+  -d '{"app_id": "d01ef4c6", "secret_key": "<CHANJING_SECRET>"}' | \
   python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('access_token',''))")
 ```
 
@@ -23,7 +23,7 @@ TOKEN=$(curl -s --max-time 10 "https://open-api.chanjing.cc/open/v1/access_token
 
 | 已知账号 | APP_ID | SECRET_KEY | 用途 |
 |:--------|:-------|:-----------|:-----|
-| 主账号 | `d01ef4c6` | `0619305cf3c74cae911472a6753b84a1` | 杨荟视频克隆等核心资产 |
+| 主账号 | `d01ef4c6` | `<CHANJING_SECRET>` | 杨荟视频克隆等核心资产 |
 | 副账号 | `d6fda3b0` | 在`.env`中 | 另一组凭证 |
 
 **排查方法：** 分别用两个APP_ID的token查同一个数字人ID，哪个返回status=2说明数字人在哪个账号下。

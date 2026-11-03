@@ -1,0 +1,75 @@
+--- /home/ubuntu/workflow/projects/publish_control/build_1.2.173/manju-publish-assistant-1.2.173-win64/agent/winport/chrome.py	2026-10-29 16:10:55.005798756 +0800
++++ /home/ubuntu/workflow/projects/publish_control/hotfix_20261103_tabreuse/files/chrome.py	2026-11-03 22:06:25.747392746 +0800
+@@ -40,6 +40,7 @@
+ import urllib.error
+ import urllib.request
+ from pathlib import Path
++from urllib.parse import urlsplit
+ 
+ from .errors import ConfigError
+ from .jsonio import read_json, write_json
+@@ -566,6 +567,47 @@
+             "error": ""}
+ 
+ 
++def cdp_pages(port, *, host="127.0.0.1", timeout=1.5) -> list:
++    """List open page targets via http://host:port/json/list."""
++    url = f"http://{host}:{int(port)}/json/list"
++    try:
++        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
++            payload = json.loads(resp.read().decode("utf-8", "replace"))
++    except (urllib.error.URLError, OSError, ValueError):
++        return []
++    if not isinstance(payload, list):
++        return []
++    return [target for target in payload
++            if isinstance(target, dict) and target.get("type") == "page"]
++
++
++def _host_of(url):
++    try:
++        return (urlsplit(str(url or "")).hostname or "").lower()
++    except ValueError:
++        return ""
++
++
++def find_open_page(port, url, *, host="127.0.0.1", timeout=1.5):
++    """Return an already open tab on the same site as ``url``.
++
++    Launching Chrome a second time with a URL makes the running instance open
++    yet another window; every scheduled publish therefore left one more tab
++    behind.  Reusing an existing tab on the same host keeps one window per
++    account instead of one per run.
++    """
++    target = _host_of(url)
++    if not target:
++        return None
++    for target_info in cdp_pages(port, host=host, timeout=timeout):
++        page_url = str(target_info.get("url") or "")
++        if page_url.startswith(("devtools://", "chrome-extension://")):
++            continue
++        if _host_of(page_url) == target:
++            return target_info
++    return None
++
++
+ def port_open(port, *, host="127.0.0.1", timeout=0.6) -> bool:
+     if not port:
+         return False
+@@ -920,6 +962,16 @@
+         result["reuse_evidence"] = reuse
+         if reuse.get("ok"):
+             reusing = True
++            existing = find_open_page(port, url) if url else None
++            if existing:
++                result.update(
++                    opened=True, reused=True, reason="TAB_REUSED", pid=reuse["pid"],
++                    runtime_argv_verified=True,
++                    matched_page=str(existing.get("url") or ""),
++                    cdp=cdp_version(port, timeout=2.0),
++                    message=(f"{env.label} 的浏览器已开着目标页面（端口 {port}），"
++                             "直接复用该标签页，不再新开窗口"))
++                return result
+             result.update(reused=True, reason="ALREADY_RUNNING", pid=reuse["pid"],
+                           runtime_argv_verified=True,
+                           message=(f"{env.label} 的浏览器已经在运行（端口 {port}），"

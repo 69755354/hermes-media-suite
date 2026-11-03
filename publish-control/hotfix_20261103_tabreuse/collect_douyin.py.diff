@@ -1,0 +1,42 @@
+--- /home/ubuntu/workflow/projects/publish_control/build_1.2.173/manju-publish-assistant-1.2.173-win64/agent/winport/collect_douyin.py	2026-10-26 16:48:04.592551440 +0800
++++ /home/ubuntu/workflow/projects/publish_control/hotfix_20261103_tabreuse/files/collect_douyin.py	2026-11-03 22:06:25.751393624 +0800
+@@ -130,6 +130,17 @@
+     return {"json": str(json_path), "csv": str(csv_path), "evidence": str(evidence)}
+ 
+ 
++def _existing_site_page(context, host):
++    """Reuse the tab this program already opened; never spawn a twin."""
++    for page in getattr(context, "pages", None) or []:
++        try:
++            if host in str(page.url or ""):
++                return page
++        except Exception:
++            continue
++    return None
++
++
+ def collect_offline(layout, xlsx_path, *, day=None, account=None, **kw):
+     rows = read_xlsx(xlsx_path)
+     normalized = normalize_export(rows, **kw)
+@@ -169,7 +180,10 @@
+         contexts = browser.contexts
+         if not contexts:
+             raise ConfigError("未检测到已登录的工作台，请先打开并登录后再取数。")
+-        page = contexts[0].new_page()
++        page = _existing_site_page(contexts[0], "creator.douyin.com")
++        created_page = page is None
++        if page is None:
++            page = contexts[0].new_page()
+         try:
+             account = {}
+             try:
+@@ -189,7 +203,8 @@
+             tmp = layout.run / "douyin-export.xlsx"
+             tmp.write_bytes(body)
+         finally:
+-            page.close()
++            if created_page:
++                page.close()
+     result = collect_offline(layout, tmp, account=account, **kw)
+     if account:
+         result["normalized"]["account"] = account

@@ -1,0 +1,20 @@
+---
+name: huolong-mixed-storyboard-v2
+description: 火龙漫剧混合通道完整分镜表v2。触发：火龙漫剧混合通道分镜。
+---
+
+# 火龙漫剧混合通道完整分镜表 v2
+
+完整分镜表文档已产出，存放于 `references/storyboard_v2.md`。
+
+目标路径：`/home/ubuntu/workflow/projects/huolong_mixed/A_STORYBOARD_mixed_v2.md`
+（终端被workflow ticket系统封锁无法创建目录，文档内容已完整写入skill references）
+
+## 文档概要
+
+- H段：1段15秒，快乐马r2v，duration=15，5句台词写在"人物说："后面
+- P段：1段38秒，婵镜数字人create_video API，187字台词放一个数组元素
+- CTA段：6秒，ffmpeg后期贴图，8层贴图叠加
+- 全片总时长：59秒
+
+用 skill_view(name='huolong-mixed-storyboard-v2', file_path='references/storyboard_v2.md') 读取完整文档。

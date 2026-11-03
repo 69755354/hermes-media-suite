@@ -1,0 +1,751 @@
+---
+name: video-audio-mixing
+description: 触发：口播语速过快/不一致、换BGM、替换基底视频音频。TTS调参+BGM选曲+音轨替换。
+---
+
+<!-- CANONICAL-RULINGS-BEGIN -->
+> ⚠️ **本文件与视频线统一口径冲突的地方，一律以统一口径为准（用户 2026-10-01 逐条拍板），旧写法作废。**
+> 统一口径单一事实源：`.hermes/skills/newmedia-operations/huolong-replica-template/references/current-rulings-20261001.md`
+> 摘要：段时长＝字数÷5.5（不提速）；句数不限、只看语言逻辑；双人段必须互相说；画面/人物/禁止事项照旧写，只有配音部分不写段首段尾语速；画幅听用户当次要求（默认竖屏 720×1280，双人优先横屏）；LOGO 念到 CTA 时淡入保持 1.5 秒；默认只用快乐马出片，婵镜/Seedance/探店线用户点名才用；成片响度 -14 LUFS；BGM 0.25；CRF 18／aac 128k／24fps；实念率底线 90%；参考片＝过审基准，照抄不退稿。
+<!-- CANONICAL-RULINGS-END -->
+
+
+# 视频音频后期混合
+
+> 与 `video-production/references/assembly-and-delivery.md` 有重叠（该文件覆盖字幕烧录、BGM合成、终检交付）。本 skill 专注 **TTS 语速调参** 和 **BGM 选曲筛选** 两个子领域。建议 `hermes curator adopt video-production` 后将本 skill 合并入该 references。
+
+## 1. TTS 语速双重加速坑（edge-tts + atempo）
+
+**症状**：口播 TTS 听感过快、急促，多人视频各段语速不一致。
+
+**根因**：edge-tts `--rate=+35%` 本身已加速 35%，再用 ffmpeg `atempo` 压缩到目标时长又加 10%-34%，双重加速导致听感不自然。不同段落因目标时长不同，atempo 压缩比不同，听感差异被放大——"第一第二个人语速过快，第三个正常"。
+
+**修复**：
+1. TTS rate 从 `+35%` 降到 `+15%`，让 edge-tts 本身念得更慢更自然
+2. atempo 仍需用（因为 raw 时长 > 目标时长），但 raw 更长所以压缩比分布更均匀
+3. 重新生成所有 voice_NN_fit.wav + concat → voice_43s.wav
+4. **关键**：合成时必须显式替换基底视频自带的旧音频轨
+
+```bash
+# 替换基底视频音频为新 TTS
+ffmpeg -y -i overlay_step1.mp4 -i voice_43s.wav \
+  -filter_complex "[1:a]atrim=0:40.5,asetpts=PTS-STARTPTS,loudnorm=I=-16:LRA=7:TP=-1.5[avoice]" \
+  -map 0:v -map "[avoice]" -c:v copy -c:a aac -b:a 160k -ar 48000 -ac 2 -t 40.5 \
+  step1_newvoice.mp4
+```
+
+### 为什么光重新生成 wav 不够
+
+Seedance/happyhorse 生成的基底视频片段（g1/g2/g3a/g3b）自带音频轨——TTS 在之前某步被烤进去了。如果你只重新生成 `voice_43s.wav` 但合成脚本用的是 `overlay_step1.mp4 -map 0:a`，那拿到的还是旧音频。必须在合成时显式 `-map 0:v -map [new_voice]` 替换掉基底音频。
+
+### build_audio.py 参数对照
+
+| 参数 | 旧值（问题） | 新值（修复） |
+|:---|:---|:---|
+| edge-tts --rate | +35% | +15% |
+| edge-tts --pitch | -10Hz | -10Hz（不变） |
+| atempo | raw/target 比值 | 同（但 raw 更长，总加速倍率降低） |
+| loudnorm | I=-16:LRA=7:TP=-1.5 | 不变 |
+
+总加速倍率 = TTS rate × atempo。旧：1.35 × 1.09-1.34 = 1.47-1.81x。新：1.15 × 1.29-1.59 = 1.48-1.83x。数值看着差不多，但听感差异在于 TTS 层面的自然度——rate +35% 时 edge-tts 会吞音、连读，+15% 时吐字清晰得多。
+
+## 2. BGM 选曲：低频能量筛选法
+
+**场景**：用户要求 BGM "潮流一些"、"跟画面风格同频"，但只有免版权 mixkit 库（29 首）。
+
+**方法**：用 ffmpeg `lowpass` + `volumedetect` 测低频能量，作为节奏感/潮流感的代理指标：
+
+```bash
+for f in /home/ubuntu/assets/bgm/mixkit_*.mp3; do
+  bass=$(ffmpeg -hide_banner -i "$f" -t 10 -af "lowpass=f=120,volumedetect" -f null - 2>&1 | grep "mean_volume" | sed 's/.*: //')
+  echo "$(basename $f): bass=${bass}"
+done
+```
+
+- 低频能量越高（dB 越接近 0）= 低音/鼓点越强 = 越适合潮流/电子风格
+- 实测排序：mixkit_158 (-14.3dB, 最强) > mixkit_1117 (-25.5dB) > mixkit_834 (更弱)
+- mixkit_834 偏轻柔，不适合夜店/潮流风格
+
+### 混音参数
+
+选中 BGM 后，混音时控制不压人声：
+
+```bash
+ffmpeg -y -i video.mp4 -i bgm.mp3 \
+  -filter_complex "
+[1:a]atrim=0:40.5,asetpts=PTS-STARTPTS,volume=0.8,alimiter=limit=0.95[bgm];
+[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights='2 1'[aout]
+" \
+  -map 0:v -map "[aout]" -c:v libx264 -preset fast -crf 22 -c:a aac -b:a 160k -t 40.5 out.mp4
+```
+
+- `volume=0.8`：BGM 降到 80% 防止过响
+- `alimiter=0.95`：限幅防削顶
+- `amix weights='2 1'`：人声权重 2 倍于 BGM
+- `normalize=0`：不做自动归一化（会压人声）
+
+## 3. 工作流：TTS+BGM 一次性替换
+
+当用户要求修改语速和 BGM 时，不需要重新生成视频画面：
+
+1. 备份旧音频（`mkdir audio/v15_backup && cp audio/voice_* audio/v15_backup/`）
+2. 修改 `build_audio.py` 的 `--rate` 参数
+3. 重新运行 `python3 work/build_audio.py` → 生成新的 `voice_43s.wav`
+4. 用新 TTS 替换 overlay_step1 的音频轨（上面第1节的 ffmpeg 命令）
+5. 加新 BGM + 字幕合成最终成片（上面第2节的 ffmpeg 命令）
+6. 抽帧 + 发用户确认
+
+**不扣费的部分**：TTS 重新生成（edge-tts 免费）、BGM 替换（ffmpeg 免费）、音频替换合成（ffmpeg 免费）。
+**扣费的部分**：如果需要修改人物表情（如微笑），需要重新跑 Seedance（600积分/段）。
+
+## 3.5 台词密度硬限制（0826实测，比TTS参数更底层的问题）
+
+**症状**：TTS参数已调到合理范围（rate +15%，atempo压缩比均匀），但口播听起来仍嫌快/赶。用户反馈"第一第二个人语速过快，第三个正常"。
+
+**根因**：不是TTS参数问题，是**台词字数 ÷ 视频时长 = 字/秒 超标**：
+- 正常中文语速：4-5字/秒（播音级3-4字/秒）
+- 火龙网赚镜1实测：71字 / 10秒 = **7.1字/秒** → 超标40%以上
+- 缩短视频时长（如原片43s→V15的40.5s）会把台词挤密，字/秒升高，TTS跟着加速
+- 模型生成的语音节奏有自己的规律，提示词写"语速适中""语速放慢"效果有限——不能精确到字/秒级别
+
+**关键认知**：当台词字数和视频时长都固定时，语速被锁死，TTS参数和提示词都调不动。这不是"调参"能解决的，是"量级"问题。
+
+**验证方法**：出对比片时必须带音频——静音无法对比语速。从原片和生成版各截同一段，贴相同字幕，带音频并排发给用户听。
+
+**解决方案（按优先级）**：
+1. 增加视频时长让字/秒降到5以下（首选——改硬切点或补空镜）
+2. 减少台词字数（删减非核心卖点，但客户指定卖点词不能动）
+3. 拆镜：把超密段落拆成两段，每段时长更充裕
+4. 混合方案：核心卖点句保持，铺垫句精简
+
+**预检步骤**（写完台词后、生成前必做）：
+1. 统计每镜台词总字数
+2. 除以该镜时长，得到字/秒
+3. >5.5字/秒 → 红旗，必须先解决密度问题再生成
+4. 4.5-5.5 → 黄灯，可生成但语速会偏快
+5. <4.5 → 绿灯，正常
+
+## 3.8 视频生成模型语速控制（快乐马/wan3.0，0826官方文档+实测）
+
+> 本节针对 DashScope 视频生成模型（快乐马 HappyHorse / wan3.0）生成的原生有声视频的语速控制，不是 TTS（edge-tts）参数调优。TTS 调参见上面第1-3节。
+
+### 核心原则：先算密度再改语速
+
+同第3.5节——如果字数密度 >7字/秒，改提示词里的语速描述没用。但即使密度在合理范围（4-6字/秒），提示词的语速写法也影响模型生成节奏。
+
+### 两个模型语速控制能力
+
+| 维度 | wan3.0 | HappyHorse |
+|:---|:---|:---|
+| audio参数 | ✅ audio=true/false | ❌ 无，纯靠 prompt 驱动 |
+| 数值语速 | ✅ 官方有"语速约2.5词/秒"示例 | ⚠️ 未确认，推测支持 |
+| 自然语言语速 | ✅ "语速缓慢""语速适中" | ✅ 同 |
+| 外部音频驱动口型 | ❌ 不支持 | ❌ 不支持 |
+| prompt_extend | 必须 false | — |
+
+### 语速写法三档（从模糊到精确）
+
+**模糊档（之前默认写法，效果不可控）：**
+```
+语速适中，吐字清晰
+```
+
+**数值档（wan3.0 官方文档有示例，推荐）：**
+```
+语速约4字/秒，吐字清晰，句间用短促自然气口，不赶
+```
+> wan3.0 官方原文示例：`语速约2.5词/秒`（英文旁白）和 `语速缓慢，带轻微回响`
+
+**对标档（复刻场景用）：**
+```
+语速与原片一致，每句完整说完再起下一句，不抢节拍
+```
+
+### 完整声音描述模板（通用）
+
+```
+配音与音效：背景为xxx，环境音有xxx。第X秒，xxx声线道："台词"。语速xxx。
+```
+> 这是 wan3.0 官方文档给的标准格式。HappyHorse 也适用，只是没有 audio 开关。
+
+### 之前火龙提示词的写法
+
+V20分镜脚本里统一写的是：`语速适中，吐字清晰` + `按起声时码逐句开口，完整说原文，不改词、不省略、不合并，口型与中文人声自然同步`
+
+### 对比音视频的铁律
+
+**做语速/音频对比时必须带音频，禁止出静音版。** 静音版只能看字幕密度，听不到实际语速节奏，无法对比——用户明确指出过"静音怎么对比"。
+
+正确做法：从原片和生成版各截同一段，贴相同字幕，**带音频**并排发给用户听。
+
+## 4. 免费BGM来源与批量下载（0826实测）
+
+### 哪些源能用，哪些不能（Linux服务器自动化）
+
+> 0826 两轮实测。用户要求去方案里点名的网站搜BGM。结论：方案提到的 Pixabay/Pexels 全被拦，最终 Incompetech + Internet Archive 两条路通。
+
+| 来源 | 能否服务器自动化 | 授权 | 备注 |
+|:---|:---|:---|:---|
+| **Incompetech (Kevin MacLeod)** | ✅ 直链下载 | CC BY 3.0（署名即可商用） | URL模式见下，实测56首有效 |
+| **Internet Archive** | ✅ 搜索API+下载 | CC BY 3.0/4.0 + CC0 | 最佳补充来源，详见下方IA下载方法 |
+| Pixabay Music | ❌ Cloudflare拦截 | Pixabay License（类CC0） | 浏览器+curl+CDN直链全403，不要浪费时间 |
+| Pexels Music | ❌ 403 | CC0 | 同上 |
+| Bensound | ❌ 全变付费 | 旧免费版已下架 | 页面能加载但全是"Add to Cart"，CDN直链也403 |
+| FreePD | ❌ 关站 | CC0 | 已永久关闭 |
+| FMA (Free Music Archive) | ✅ 能访问但无可商用 | 混合 | 搜到850首cinematic，第一页18首全CC BY-NC/ND/SA，无纯CC BY |
+| Chosic | ❌ 403 | - | 服务器被拒 |
+| mixkit | ✅ 已囤29首本地 | mixkit License（免费商用） | 存广州机 `/home/ubuntu/assets/bgm/` |
+
+### Incompetech 批量下载方法
+
+URL模式：`https://incompetech.com/music/royalty-free/mp3-royaltyfree/<TrackName>.mp3`（空格用 `%20`）
+
+```bash
+# 批量下载 + ffprobe验证
+mkdir -p /tmp/cc0_bgm
+for track in "The Descent" "Anguish" "Long Road Ahead" "Slow Burn" ...; do
+  encoded=$(echo "$track" | sed 's/ /%20/g')
+  out=$(echo "$track" | tr ' ' '_' | tr 'A-Z' 'a-z').mp3
+  curl -s -L --max-time 20 -o "/tmp/cc0_bgm/$out" \
+    "https://incompetech.com/music/royalty-free/mp3-royaltyfree/${encoded}.mp3"
+  # ffprobe验证有效性
+  dur=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "/tmp/cc0_bgm/$out" 2>/dev/null)
+  [ -z "$dur" ] && rm -f "/tmp/cc0_bgm/$out"  # 无效文件删除
+done
+```
+
+- 尝试129个曲名，56首命中（约43%成功率，曲名要对Kevin MacLeod实际曲目）
+- 下载后必须ffprobe验证——有些URL返回200但内容是HTML错误页
+- 上传COS走加速域名：`COS_ACCELERATE=1 cos_manager.py upload sc <file> bgm/cc0/<name>`（56首431MB约127秒）
+
+### Internet Archive 批量下载方法
+
+IA 搜索 API：`https://archive.org/advancedsearch.php?q=collection:opensource_audio+AND+subject:cinematic&fl[]=identifier&fl[]=title&fl[]=licenseurl&sort[]=downloads+desc&output=json&rows=100`
+
+筛选 CC BY / CC0 的item，再取 metadata 获取文件列表：
+
+```python
+# 1. 搜索 → 获取identifier列表
+# 2. 对每个identifier: curl https://archive.org/metadata/{identifier} → 获取files列表
+# 3. 筛选mp3文件 + 过滤分轨(Vocals Only/Strings Only等)
+# 4. 下载: https://archive.org/download/{identifier}/{filename}
+```
+
+**⚠️ IA下载坑：文件名必须URL encode**
+
+IA文件名常含空格、括号（如 `80s Dramatic Synth Strings (from Stay).mp3`）。**不URL encode会返回0字节不报错——静默失败**。必须用 `urllib.parse.quote(filename)` 编码。
+
+排查方法：下载后检查文件大小，<10KB一定是失败。批量下载时脚本里加ffprobe验证删除无效文件。
+
+实测IA下载速度比Incompetech慢（需0.5-1秒间隔避免限速），但曲库更大。从IA获取59首cinematic音乐（CinematicMusicPackOne 35首 + FreeRoyaltyFreeMusic 18首 + DanielIvan 4首 + Bonnot CC0 2首），全部CC BY 3.0/4.0或CC0。
+
+### BGM库现状
+
+| 库 | 位置 | 数量 | 风格 |
+|:---|:---|:---|:---|
+| mixkit | 广州机 `/home/ubuntu/assets/bgm/` | 29首 | 现代节奏/电子 |
+| CC0/CC BY (Incompetech 56首 + IA 59首) | COS `sc-1447774428/bgm/cc0/` | **115首** | 叙事氛围/cinematic/悬疑/古典/电子 |
+
+全部ffprobe验证通过，全部CC BY 3.0/4.0或CC0授权，免费商用。
+
+## 5. 抖音发布端BGM策略
+
+> 详见 `references/douyin-bgm-strategy.md`。本节是发布端的策略，区别于上面1-3节的生产端混音。
+>
+> **去硬字幕（无底片时）**：用户发来的视频烧死了字幕、没有无字幕底片可回退时，用 `delogo` 滤镜 + 像素分析自动定位字幕区域并糊掉。详见 `references/delogo-remove-hardcoded-subtitles.md`。
+>
+> **火龙版本总图**：用户问"火龙有哪些视频""发XX版定稿""这是哪个版本"时，查 `references/huolong-version-map.md` 定位正确版本，不要凭记忆猜（0828连续猜错2次）。版本总图含全部56条视频的ffprobe指纹（分辨率/时长/码率/大小/音量），可按参数匹配识别用户发来的视频是哪个版本。用户说"这是哪个版本"时的识别方法：①grep gateway日志找缓存路径 ②ffprobe拉参数 ③比对版本总表 ④音轨指纹(mean+max volume)匹配同一素材不同转码。
+
+**核心现实**：抖音有正版曲库但API拿不到，只能本地预处理视频再上传。
+
+**方案A（推荐，零版权风险）**：视频不带BGM上传 → 抖音APP内选曲 → 音乐音量调到10-20
+- 优点：直接用抖音正版曲库几十万首，零版权风险，支持自动人声增强和音乐闪避
+- 缺点：不能完全服务器自动化，上传后需手动选曲
+
+**方案B（全自动，需把控版权）**：本地混CC0无版权BGM再上传
+- 优点：流水线100%自动化，导出成品直接上传
+- 缺点：极低概率版权命中（即使CC0，个别曲子抖音库未收录仍可能触发提示）
+- 安全来源：Incompetech CC BY / mixkit / Pixabay（如果能绕过Cloudflare）
+- **禁止**：下载抖音别人视频的BGM扒出来复用，属于侵权
+
+**发抖音BGM铁律**：
+1. 不带歌词！漫剧口播，带歌词BGM和人声打架
+2. BGM音量15-20%，口播台词第一位
+3. 纯音乐伴奏
+
+**最优工作流（兼顾自动化+抖音版权）**：
+```
+Seedance生成 → FFmpeg抽帧vision质检 → 输出【无BGM】纯净人声版mp4
+→ 上传抖音 → 抖音端选正版BGM → 音量10-20 → 发布
+```
+追求100%全自动则走方案B，用已囤的CC0/mixkit库随机选曲+volume=0.15-0.18。
+
+## 5.5 字幕"太小"诊断：MarginV 不是 Fontsize（2026-08-27 实测）
+
+**症状**：客户/达人说"字幕太小了"，但 Fontsize 已经是 56（大字号）。
+
+**根因**：不是字号小，是**字幕位置太靠下**——MarginV=380 把字幕推到画面最底部，离视觉中心远，观感"小"。
+
+**诊断方法**：对比当前 ASS Style 行的 MarginV 与通用口播模板的 MarginV：
+```bash
+grep "Style: Main" <当前字幕.ass>   # 看 MarginV（倒数第2个数值）
+grep "Style: Main" <通用口播模板字幕.ass>
+```
+
+**实测参数对照**（火龙项目）：
+
+| 版本 | Fontsize | MarginV | 观感 |
+|:---|:---|:---|:---|
+| V15夜店(v8) | 56 | **380** | 太靠下，客户说"太小" |
+| 通用口播(v17) | 56 | **300** | 更居中，显眼 |
+| 逐字保留(早期) | 46 | 168 | 最靠上，但字号确实小 |
+
+**修复**：改 MarginV 不改 Fontsize——`sed 's/60,60,380,1/60,60,300,1/'`
+
+## 5.5b 字幕"太小"第二根因：PlayRes 不匹配视频分辨率（2026-08-27 实测）
+
+**症状**：MarginV 已调到 300，Fontsize 已是 56-60，但客户仍说字幕小。
+
+**根因**：ASS 文件的 `PlayResX/PlayResY` 写的 1080×1920，但视频实际是 720×1280。播放器按 1080 的高度渲染字幕，再缩到 720 显示——**字幕视觉缩小约 33%**，MarginV 也偏移。
+
+**诊断方法**：
+```bash
+# 1. 查 ASS 的 PlayRes
+head -8 <字幕.ass> | grep PlayRes
+# 2. 查视频实际分辨率
+ffprobe -v error -show_entries stream=width,height -of csv=p=0 <视频.mp4>
+```
+不一致 → PlayRes 是第二根因。
+
+**修复**：PlayRes 改成跟视频实际分辨率一致。火龙通用口播模板实测：PlayRes 1080×1920→720×1280 后，Fontsize=60 的字幕在 720×1280 视频上显示正常大小。
+
+**字幕参数全面对齐模板的检查清单**（方漠阳要求"参考网赚口播模板的字幕形式"时的逐项核对）：
+
+| 参数 | 易错点 | 模板基准（v7_subtitles.ass） |
+|:---|:---|:---|
+| PlayResX/Y | 与视频分辨率不一致→字幕缩小 | 等于视频实际分辨率 |
+| Fontname | WenQuanYi 过细 | Noto Sans CJK SC（已装 Bold+Regular） |
+| Fontsize | 54 偏小 | 60 |
+| Bold | 0 不醒目 | 1 |
+| Outline | 4 OK | 4 |
+| MarginV | 240 偏下 | 300 |
+| Risk 行 | 缺合规提示 | 全程叠加"本故事纯属虚构 无不良引导 请勿模仿" |
+
+## 5.6 "音量太小"诊断：BGM 盖人声（2026-08-27 实测）
+
+**症状**：客户/达人说"音量太小了"。
+
+**根因**：BGM volume=1.5 远大于人声，BGM 盖住口播。人声源本身 mean=-17.2dB（偏低）。
+
+**诊断方法**：
+```bash
+# 查成片、人声源、通用模板成片的响度对比
+ffmpeg -hide_banner -i <成片.mp4> -af "volumedetect" -f null - 2>&1 | grep -E "mean_volume|max_volume"
+ffmpeg -hide_banner -i <人声源.mp4> -af "volumedetect" -f null - 2>&1 | grep -E "mean_volume|max_volume"
+```
+
+**实测对照**：
+
+| 版本 | 人声源 | BGM volume | amix weights | 成片 mean | 问题 |
+|:---|:---|:---|:---|:---|:---|
+| V15夜店 | -17.2dB | **1.5** | 2:1 | -11.5dB | BGM盖人声 |
+| V14通用 | -17.2dB | **0.25** | 默认 | -15.1dB | 人声清晰 |
+| V16修复 | -17.2dB | **0.25** | 3:1 | -10.8dB | 人声响+BGM弱 |
+
+**修复**：从贴片合成后无BGM的中间产物重新合成，人声加 `loudnorm=I=-14`，BGM降到 `volume=0.25`，amix `weights='3 1'`。
+
+## 5.7 中间产物复用：只改字幕+音量不重新生成（2026-08-27 实测）
+
+客户要求"调字幕/调音量再出一版"时，找到贴片合成后无字幕无BGM的中间产物（如 `复刻_*_v13_*.mp4`）直接重新合成，**不调付费API**。
+
+工作流：找中间产物→改ASS参数→ffmpeg重新合成→抽帧vision验证→发群。
+
+## 6. 拼接时丢音轨 → 声画口型全错位（2026-08-28 火龙V7血泪教训）
+
+**症状**：成片口型跟声音对不上，字幕内容跟音频内容也对不上。
+
+**根因**：快乐马/wan3.0 r2v 生成的原始段**自带音轨**（声音+口型同步），但拼接时用 ffmpeg concat 或 trim 裁切段只取了视频流，**音轨被丢了**。然后补音频时从原片抽了一条贴上去——原片声音跟AI数字人口型完全对不上。
+
+**错误链条**：
+```
+原始段(hh1.mp4 有视频+音频, 口型同步) 
+→ trim/concat 只取视频 → seg01.mp4 (无音轨) 
+→ 拼成 V7底片 (无音轨) 
+→ 从原片765152抽 orig_audio.aac 贴上去 
+→ 声音是原片刘姐的，画面是AI数字人 → 口型对不上
+```
+
+**用户原话纠正**：
+- "你为什么要拼接音频呢？原始视频不是有吗？"——原始段有声音，不该拆开
+- "你不能直接把原始视频的声音调大？"——直接用原始段音轨，调大音量就行
+- "一定要抽出来吗？"——不该抽，不该拆
+
+**正确做法（0828 V9/V10实测定案）**：
+
+**第一步：先 ffprobe 查底片有没有音轨**。不要假设底片无音轨——V7底片 `huolong_v7_no_subtitles.mp4` 实际上**有音轨**（mean -11.4dB），画面和声音口型本来就是对得上的。
+
+```bash
+ffprobe -v error -show_entries stream=codec_type,codec_name -of csv <底片.mp4>
+# 如果有 audio stream → 底片有音轨，直接跳到第三步
+```
+
+**第二步（仅当底片确实无音轨时）**：从原始生成段提取音轨拼回去。但**必须按画面实际裁切顺序排列音频**，不能按hh原始顺序——如果画面裁切重排了，音频跟着画面走，不跟着原始段走。
+
+**第三步：直接对底片原音调大音量+加字幕**。底片已有正确音轨时，最简单最安全的做法：
+
+```bash
+ffmpeg -y -i <底片.mp4> \
+  -filter_complex "[0:a]volume=8dB,alimiter=limit=0.95[aout];[0:v]ass=subtitles.ass[vout]" \
+  -map "[vout]" -map "[aout]" \
+  -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -r 30 -g 60 \
+  -c:a aac -b:a 160k -ar 48000 -ac 2 -movflags +faststart -shortest out.mp4
+```
+
+**V9错误复盘（0828血泪教训）**：V9把5段hh音频按原始顺序拼成连续音轨贴到V7底片上——但V7底片的画面段是从不同hh段裁切重组的，**画面裁切顺序跟hh原始顺序不一致**，导致音频和口型错位。V10直接用V7底片原音调大音量，口型完全正确。
+
+**铁律**：
+1. 拼接生成段时**不丢音轨**——快乐马/wan3.0 r2v 生成的视频自带声音和口型同步
+2. 禁止从原片抽音轨贴到AI生成画面上——声音和口型是绑定的，拆开就错位
+3. 调音量直接对原始音轨操作，不需要"抽出来"再"贴回去"
+4. **底片可能已有音轨**——先ffprobe查，有音轨就直接调音量加字幕，不要拆了重组
+5. **禁止重新拼音频贴到已有音轨的底片上**——画面裁切顺序可能跟原始段顺序不一致，重组音频会导致口型错位
+
+## 6.5 快乐马/wan3.0 r2v 原始音量基线（0828实测）
+
+快乐马 HappyHorse r2v 生成的原始视频音量统一偏低，这是模型特性不是 bug：
+
+| 段 | mean | max |
+|:---|:---|:---|
+| hh1_replica_v1 | -17.6dB | -3.3dB |
+| hh1_general_v4 | -17.8dB | -3.4dB |
+| hh2_general_v1 | -18.7dB | -3.6dB |
+| hh5_general_v1 | -18.3dB | -3.8dB |
+| V13夜店底片 | -17.2dB | -3.0dB |
+
+**全部 -17~-18dB mean**。用户问"为什么生成视频声音小"，答案就是这个——模型输出的原始音量就这么低。
+
+**但用户说"快乐马生成的其他视频声音不小"**：因为最终交付版在 compose 阶段加了 `loudnorm=I=-14` 或 `volume=8dB`，提到 -10~-11dB。用户听到的是最终版，不是原始段。
+
+**诊断步骤**（用户说"声音小"时）：
+1. 先查成片有没有应用 loudnorm/volume——不是查原始段
+2. 原始段 -17dB 是正常的，不是问题
+3. 如果成片还是 -17dB → compose 脚本漏了音量处理
+4. 如果成片 -10dB 但用户仍嫌小 → 参考 `references/volume-boost-technique.md` 做动态压缩+增益
+
+## 6.7 一条ffmpeg调音量+烧字幕不抽声音（0828实测）
+
+**场景**：用户发来一条视频，要求"把音量调大、字幕调大，不要把声音抽出来"。
+
+**用户铁律**：不要把声音从视频里抽出来再贴回去。r2v模型生成的视频声音和口型是配对的，拆开重组会口型崩。
+
+**正确做法——一条ffmpeg，视频烧字幕重编码，音频直接在流里调音量**：
+
+```bash
+# 1. ASR拿逐句时间轴
+python3 -c "
+from faster_whisper import WhisperModel
+model = WhisperModel('small', device='cpu', compute_type='int8')
+segments, info = model.transcribe('input.mp4', language='zh', beam_size=5)
+for seg in segments:
+    print(f'{seg.start:.1f}-{seg.end:.1f}s: {seg.text}')
+"
+
+# 2. 生成ASS字幕（PlayRes匹配视频实际分辨率，字号72大字，MarginV300）
+
+# 3. 一条ffmpeg合成（不抽音频）
+ffmpeg -y -i input.mp4 \
+  -vf "ass=subtitles.ass" \
+  -af "volume=2.0,loudnorm=I=-14:LRA=11:TP=-1.5" \
+  -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p \
+  -c:a aac -b:a 128k -ar 44100 -ac 2 \
+  -movflags +faststart \
+  output.mp4
+```
+
+**关键参数**：
+- `-vf ass=` 烧字幕（视频流重编码，必须的）
+- `-af "volume=2.0,loudnorm=I=-14"` 音频直接在流里调（不抽出来）
+- **不写** `-map 1:a`，不从外部文件引入音频
+- PlayRes必须匹配视频实际分辨率（1080x1920视频→ASS PlayResX=1080 PlayResY=1920）
+- 字幕72号白字+紫阴影，MarginV 300
+
+**实测效果**：原片 mean -23.4dB → 成片 mean -17.1dB，字幕清晰显眼，口型不动。
+
+## 6.75 ASR字幕对齐：AI口播节奏≠原片时间轴（0828实测定案）
+
+**症状**：成片字幕和语音对不上，越到后半段漂移越严重，最后几句字幕和语音完全错位。
+
+**根因**：字幕ASS时间码是按参考原片（如39.8s）写的，但AI生成口播（快乐马/wan3.0 r2v）的节奏不同——33.7s就念完了。差6秒，后半段每句都漂移1-2秒。
+
+**诊断方法**：
+```bash
+# 1. 从成片提取音频
+ffmpeg -y -i final.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 /tmp/asr_audio.wav
+
+# 2. faster-whisper转录拿真实时间码
+python3 -c "
+from faster_whisper import WhisperModel
+model = WhisperModel('medium', device='cpu', compute_type='int8')
+segments, info = model.transcribe('/tmp/asr_audio.wav', language='zh', beam_size=1)
+for seg in segments:
+    print(f'[{seg.start:.2f}-{seg.end:.2f}] {seg.text.strip()}')
+"
+# CPU跑medium模型约3分钟，large-v3会超时（300s+）
+```
+
+**修复流程**：
+1. 用ASR真实时间码重建ASS字幕（Dialogue行的Start/End用ASR时间码）
+2. 花字关键词同步用ASR时间码
+3. ASR识别"漫剧"可能变"慢剧"——人工核验同音错字
+4. 漏念的台词从字幕删掉，不补不猜
+5. 重新烧录+合成
+
+**铁律**：
+- ⚠️ **字幕时间码必须用ASR真实时间码，不用原片时间码**
+- AI口播节奏≠原片，实测33.7s vs 39.8s差6s，后半段每句漂移1-2s
+- faster-whisper用medium模型（large-v3 CPU超时），beam_size=1够用
+- ASR后必须人工核验同音错字
+- 验证：抽4+帧vision看字幕是否和画面+语音对齐
+
+**适用场景**：任何用参考视频时间轴写字幕、但实际音频是AI生成的场景。不限于火龙项目。
+
+## 6.8 飞书发视频用hermes send不用feishu_send_video.py（0828实测）
+
+`feishu_send_video.py` 脚本用 `msg_type=video` 发送会报 HTTP 400（2026-08-28实测）。改用 `hermes send` 命令可靠：
+
+```bash
+hermes send -t feishu:<chat_id> "描述文字
+MEDIA:/path/to/video.mp4"
+```
+
+- 大文件（>10MB）先压CRF28+AAC128k
+- `MEDIA:` 路径写在消息文本里，hermes自动识别为附件发送
+- chat_id 用 Home 频道的 `<HOME_CHAT_ID>`
+
+## 6.85 视频整体变速压缩：atempo+setpts 按参考片时长对齐（0828实测）
+
+**场景**：用户有一条50秒的纯平台介绍版视频，要求按40秒原片参考视频的节奏压成40秒。不是裁剪片段，是整体变速不变调。
+
+**关键区分**：这不是 TTS 语速调参（第1-3节），是对已有成片做整体时长压缩。内容一字不删，只是语速调快到跟参考片一致。
+
+**方法**：用 `setpts` 压缩视频流时间戳 + `atempo` 压缩音频流速度（不变调）。
+
+```bash
+# 1. ffprobe 查源片和参考片的精确时长
+src_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 source.mp4)
+dst_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 reference.mp4)
+factor=$(python3 -c "print(f'{$src_dur/$dst_dur:.4f}')")
+
+# 2. setpts=PTS/factor 压缩视频，atempo=factor 压缩音频
+ffmpeg -y -i source.mp4 \
+  -filter_complex "[0:v]setpts=PTS/${factor}[v];[0:a]atempo=${factor}[a]" \
+  -map "[v]" -map "[a]" \
+  -c:v libx264 -preset slow -crf 18 \
+  -c:a aac -b:a 128k \
+  output.mp4
+```
+
+**实测**：50.6s → 39.9s（factor=1.2700），内容完整保留，语速加快但音调不变。抽帧+vision验证画面内容和字幕在对应时间点与参考片对齐。
+
+**注意事项**：
+- `atempo` 范围 0.5-2.0（单次），超出需链式 `atempo=1.5,atempo=1.2`
+- 变速后口型会跟音频同步（因为视频和音频同时压缩），不会口型崩
+- 验证时抽同一时间点的帧对比内容是否对齐参考片
+- 用户说"按照参考视频的节奏"="按参考视频的分段和时长来"，不是裁剪，是整体变速
+
+## 6.88 成片整体提速：用户说"太慢/脱节"时的诊断与修复（0906实测）
+
+**症状**：用户反馈"语言节奏有点问题，说的太慢了，有点脱节"。这是对AI生成有声视频（快乐马/wan3.0 r2v）成片的常见反馈。
+
+**诊断方法**：用 faster-whisper ASR 分析每段语音密度和句间空隙：
+
+```python
+import json
+with open('asr.json') as f:
+    data = json.load(f)
+for seg_key in ['segment_01','segment_02','segment_03']:
+    seg = data[seg_key]
+    speech_time = sum(s['end']-s['start'] for s in seg['segments'])
+    silence = seg['duration'] - speech_time
+    total_chars = sum(len(s['text']) for s in seg['segments'])
+    chars_per_sec = total_chars / speech_time
+    print(f'{seg_key}: {chars_per_sec:.1f}字/秒, 空隙{silence:.1f}s ({silence/seg["duration"]*100:.0f}%)')
+```
+
+**0906实测数据**：
+- Seg1(剧情段)：3.0字/秒，空隙1.6s(11%) → 明显太慢，句间停顿长
+- Seg2(口播段)：4.5字/秒，空隙0.2s(1%) → 密度正常
+- Seg3(CTA段)：3.8字/秒，空隙1.2s(8%) → 偏慢
+
+**修复**：对最终成片（已烧字幕+贴图+BGM）整体 1.2x 变速。与 6.85 节同一技术，但应用场景不同——6.85 是"对齐参考片时长"，本节是"用户主观反馈太慢/脱节"。
+
+```bash
+ffmpeg -y -i final_v6.mp4 \
+  -filter_complex "[0:v]setpts=PTS/1.2[v];[0:a]atempo=1.2[a]" \
+  -map "[v]" -map "[a]" \
+  -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -r 24 \
+  -movflags +faststart final_v7.mp4
+```
+
+**为什么能对成片整体加速**：setpts 压视频时间戳 + atempo 压音频速度，两者同比例压缩→音画同步不变。已烧录的字幕和贴图跟着视频流一起加速→不会错位。不需要回到底片重新合成。
+
+**倍率选择**：1.2x 是安全档——提速20%明显改善节奏但不至于急促。用户觉得还不够快可以再加到1.3x。超过1.5x会听感不自然。
+
+**注意**：此方法只改速度不删内容，台词一字不漏。如果根因是台词密度过高（>7字/秒，见3.5节），提速会更赶，应先减字数再考虑提速。
+
+## 6.9 用户发指令时不要弹选择题（0828用户纠正）
+
+用户说"把她修改完"时，助手不该用 `clarify` 工具弹4个选项问改哪个部分。用户已明确说了要做什么，直接干。只有真正歧义且影响结果的才问，且只问一个最简单的问题。
+
+**铁律**：用户的指令性语句=直接执行，不弹选择题。用户说"改完"就改完全部，不用问"改哪个部分"。
+
+## 6.6 用户纠正口型错位时的行为纪律（0828五次纠正）
+
+用户连续问了5个纠正性问题，每个都在告诉答案，但助手一直在解释而不是直接认错干活：
+
+| 用户说的 | 用户意思 | 助手该做的 |
+|:---|:---|:---|
+| "她本来不就是生成了声音？" | 原始段有声音，别丢 | 直接说"对"，去查原始段音轨 |
+| "你不能直接把原始视频的声音调大？" | 不用抽出来，直接调 | 直接说"对"，去调 |
+| "一定要抽出来吗？" | 不该抽 | 直接说"不该"，去改方案 |
+| "你傻逼啊" | 别丢掉V7结构重做 | 直接认，保留结构只改音频 |
+| "你的素材是直接贴在视频上的，跟声音有什么关系？" | 画面跟音频独立 | 别把画面问题归因于音频 |
+| "你现在调声音是不是必须把音频抽出来？" | 不用抽，直接对原音轨调 | 直接说"不用"，去干 |
+| "你不能直接把原始视频的声音调大？" | 不用抽不用拼，直接调 | 直接说"对"，去调 |
+| "就是那个夜店版"（指声音不小） | 最终版加了loudnorm，不是原始段声音大 | 先查成片音量再答，别猜 |
+| "为什么夜店的口型能对上，这个对不上？" | 夜店版没拆过音轨，刘姐版拆了重组错了 | 认错，直接用底片原音重做 |
+
+**铁律**：用户用反问句纠正时，是在告诉你答案。别长篇解释原理，直接认→直接干。用户说"你放屁"时，说明你之前的解释是错的，先查实际数据再说话，不要猜。
+
+## 7. DashScope 批量异步出片→拼接→调音量一条龙
+
+> 详见 `references/dashscope-batch-async-workflow.md`。多段快乐马/wan3.0 分段出片的完整工作流：批量提交 task_id → 后台并行轮询 → curl 下载 → ffprobe 校验一致性 → concat demuxer stream copy 拼接 → loudnorm 调音量到 -14 LUFS → hermes send 交付。0828 实测5段一次过。
+
+## 8. 照原片方式合成：画中画+花字+App素材（0828实测）
+
+> 详见 `references/circle-pip-and-keyword-overlay.md`。用户要求"按照原片的素材插入方式"做后期。核心：先逐帧 vision 分析原片结构，再照着做，不自创格式。
+
+### 8.1 原片素材插入模式（逐帧vision分析定案）
+
+**铁律：1秒1帧密集抽帧，不能2-3秒抽1帧。** 2秒间隔会把交替结构误判为连续覆盖。
+
+原片（刘姐39.8s）1秒1帧分析结果：
+
+| 时段 | 画面内容 | 叠加元素 |
+|:---|:---|:---|
+| 0-22s | 数字人口播 + 小画中画闪App界面 | 黄字黑边花字关键词 + 白字字幕 + 风险提示 |
+| 23-26s | 全屏App分类页 | 花字"题材丰富" |
+| 27-29s | 回数字人（小PIP弹窗） | 花字 |
+| 30-32s | 全屏App播放页 | 花字"丝滑流畅" |
+| 33-34s | 回数字人 | 花字 |
+| 35-36s | 全屏App界面 | 花字 |
+| 37-39s | 数字人收尾 | 花字"该知道去" |
+
+**原片是交替切换模式**：数字人→App→数字人→App→数字人→App→数字人。不是一段素材从头盖到尾。
+
+**0828用户最终纠正定案**：说到"全集了"之后插的就是选集页那段动态录屏，**后面所有App素材全是全屏动态视频**，不是分屏不是截图。选集页跟分类页/热播榜/播放页一样全屏覆盖。
+
+**三个关键区别**（原片 vs 初版错误）：
+1. **花字关键词**：原片全程叠黄字黑边关键词，跟着口播变
+2. **圆形画中画**：App素材段右上角有圆形数字人小窗，人没断
+3. **交替不是连续**：原片在数字人和App画面之间来回切换，按口播内容匹配App页面
+
+### 8.2 圆形画中画实现（alphamerge + overlay）
+
+**坑1：geq 滤镜生成圆形 mask 太慢**（300秒超时）。
+**解决**：用 Python PIL 生成 PNG mask，ffmpeg `-loop 1 -i mask.png` 读入。
+
+```python
+from PIL import Image, ImageDraw
+mask = Image.new('RGBA', (600, 600), (0, 0, 0, 0))
+draw = ImageDraw.Draw(mask)
+draw.ellipse([20, 20, 580, 580], fill=(255, 255, 255, 255))
+mask.save("circle_mask_600.png")
+```
+
+**坑2：libx264 不保留 alpha 通道**。PIP 视频不能单独导出再 overlay——alpha 会被丢。必须在同一个 filter_complex 里做 crop+alphamerge+overlay。
+
+**坑3：人脸定位要 vision 抽帧确认**。crop 坐标不能猜，先从底片抽帧→vision 分析脸的中心坐标和范围→算 crop 左上角。人脸在 720×1280 底片约 x=60-660, y=30-630，用 600×600 crop at (60,30) 能覆盖全脸。
+
+```bash
+ffmpeg -y \
+  -i base.mp4 \
+  -i app_seg_category.mp4 \
+  -i app_seg_hotlist.mp4 \
+  -i app_seg_play.mp4 \
+  -loop 1 -i mask.png \
+  -filter_complex \
+  "[0:v]crop=600:600:60:30,setsar=1,format=rgba[pip_crop];\
+   [4:v]format=rgba,scale=600:600[mask_s];\
+   [pip_crop][mask_s]alphamerge[pip_circ];\
+   [pip_circ]scale=200:200[pip_small];\
+   [0:v][1:v]overlay=x=0:y=0:enable='between(t,15.2,19.2)'[v1];\
+   [v1][2:v]overlay=x=0:y=0:enable='between(t,19.2,23.533)'[v2];\
+   [v2][3:v]overlay=x=0:y=0:enable='between(t,27.7,31.908)'[v3];\
+   [v3][pip_small]overlay=x=500:y=60:enable='between(t,15.2,19.2)+between(t,27.7,31.908)'[vout]" \
+  -map "[vout]" -map 0:a \
+  -c:v libx264 -preset fast -crf 19 -pix_fmt yuv420p \
+  -c:a copy -r 24 -g 48 -t 33.733 overlay.mp4
+```
+
+> **注意**：不是把4段App素材拼成一条ui_timeline再整段overlay，而是每段App素材作为独立输入，分别overlay到对应口播时段。中间24-27.7s是数字人回切段不叠App素材。
+
+### 8.3 花字关键词 ASS 图层
+
+独立 ASS 文件，与口播字幕分开。链式烧录：`ass='subtitles.ass',ass='keywords.ass'`
+
+```ass
+Style: KW,Noto Sans CJK SC,64,&H0000FFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,5,3,8,0,0,200,1
+```
+
+- 亮黄色 `&H0000FFFF` + 粗黑描边 Outline=5
+- 位置 Alignment=8（中上），MarginV=200
+- 每句口播对应一个关键词
+
+### 8.4 overlay shortest=1 坑
+
+`overlay=shortest=1` 会让输出截断到较短输入流。当 UI 素材（14.3s）比底片（33.7s）短时，加 `shortest=1` 会把输出截成 14.3s。去掉 `shortest=1` 或用 `enable='between(t,...)'` 控制叠加时段。
+
+### 8.5 完整合成命令
+
+```bash
+ffmpeg -y \
+  -i overlay_with_pip.mp4 \
+  -stream_loop -1 -i bgm.mp3 \
+  -filter_complex \
+  "[0:v]ass='subtitles.ass',ass='keywords.ass'[vout];\
+   [1:a]atrim=0:33.733,asetpts=PTS-STARTPTS,volume=0.25[bgm];\
+   [0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0:weights='3 1'[aout]" \
+  -map "[vout]" -map "[aout]" \
+  -c:v libx264 -preset fast -crf 19 -pix_fmt yuv420p \
+  -c:a aac -b:a 128k -ar 48000 -ac 2 \
+  -r 24 -g 48 -t 33.733 -movflags +faststart \
+  final.mp4
+```
+
+## Pitfalls
+
+- **照原片方式插素材**（0828用户纠正）：用户说"按照原片的素材插入方式"时，必须先逐帧 vision 分析原片的素材插入模式（全屏/半屏/画中画/花字位置），再照着做。不要自创格式。原片分析要点：①数字人段叠花字关键词 ②App段有圆形画中画数字人 ③花字全程贯穿 ④不是全程全屏覆盖。
+- **原片素材是交替切换不是连续覆盖**（0828用户三次纠正）：原片在数字人和App画面之间来回切换（数字人→App分类页→数字人→App播放页→数字人→App界面→数字人收尾），不是一段App录屏从头盖到尾。初版把4段App素材拼成一条14秒连续素材从头overlay到尾=错误。正确做法：每段App素材独立overlay到对应口播时段（讲"题材丰富"→分类页，讲"丝滑流畅"→播放页），中间留数字人回切段。
+- **选集页素材是全屏动态视频不是分屏**（0828用户最终纠正）：原片说到"全集了"之后插的就是选集页那段动态录屏，**后面所有App素材全是全屏动态视频**。不要做上下分屏（上下分屏只适用于原片5-6秒签到日历那一段），选集页跟分类页/热播榜/播放页一样全屏覆盖。做了分屏用户会说"我给你的是视频素材"。
+- **先确认参考视频对不对再动手**（0828用户纠正）：用户反复说"你先停下来""你先告诉我你参考的是哪个视频"时，说明参考视频可能搞错了。先停下来说出参考视频路径，让用户确认，不要继续干活。
+- **逐帧拆原片必须1秒1帧**（0828实测）：2-3秒抽1帧会漏画面切点，把交替结构误判为连续覆盖。密集抽帧（1秒1帧）才能看到完整画面切换模式。
+- **用户给视频素材就全用视频**（0828用户纠正）：用户提供的是 App 录屏视频（.mp4），不要用静态 PNG 截图替代。混入静态图用户会说"我给你的是视频素材"。拼接时每段必须取完整视频流（`-t <dur>`），不能用 `-frames:v 1` 只抽一帧当静态图用——素材全程静止用户会说"你放进去的都是静止的"。
+- **overlay shortest=1 截断输出**（0828实测）：UI 素材比底片短时，`shortest=1` 会把输出截断到 UI 素材长度。去掉 `shortest=1`，改用 `enable='between(t,...)'` 控制时段。
+- **⚠️ overlay enable='between()' 冻帧**（0828重大实测）：用 `enable='between()'` 逐段叠加多段短素材时，非启用时段输入流暂停推进，再启用时流已 EOF 导致冻帧（只显示第一帧）。`setpts=PTS-STARTPTS` 不能修复。**修复**：把所有 App 素材按时间轴 concat 成与底片等长的完整视频（非 App 段用黑场填充），再一次性 `overlay=eof_action=pass`。验证方法：抽帧算 md5，同一 App 段内不同时间点 md5 必须不同。详见 `references/circle-pip-and-keyword-overlay.md` 的冻帧坑章节。
+- **geq 生成圆形 mask 超时**（0828实测）：ffmpeg `geq` 滤镜逐像素计算圆形 alpha mask 极慢（300s 超时）。用 PIL 生成 PNG mask 替代。
+- **libx264 不保留 alpha**（0828实测）：PIP 圆形数字人不能单独导出为 mp4 再 overlay——alpha 会被丢弃。必须在同一 filter_complex 里完成 crop+alphamerge+overlay。
+- **crop 人脸坐标要 vision 确认**（0828实测）：crop 坐标猜不准会只裁到额头。先从底片抽帧→vision 分析脸的中心坐标和范围→计算 crop 左上角。
+- **先核实"这个"指哪个视频再动手**：群里说"字幕/音量太小了"时，先拉群消息+gateway日志确认指哪条视频，不要猜。详见 `video-content-extraction/references/video-template-comparison.md` 的"群聊任务核实铁律"（2026-08-27 三次纠正，0828私聊再次翻车）。**具体方法**：①拉群消息看 `reply_to_id` 字段——gateway 日志里 `reply_to_id=om_xxx` 直接链接方漠阳回复的那条视频消息 ID，是确定"这个"指向哪个视频的铁证 ②`nonsupport` 消息（飞书 API 对 media 类型的标记）用时间戳 `python3 -c "import datetime; print(datetime.datetime.fromtimestamp(ts/1000, tz=...))"` 转北京时间后 grep gateway.log 查同一时间段的私聊线索 ③用户发视频附件时立即 `ffprobe` + `whisper` + `vision_analyze` 看内容，台词内容可直接确认是哪条视频 ④被用户问"改的是这个吗"时 STOP 去查源，禁止再猜 ⑤从无字幕底片（如 `huolong_v7_no_subtitles.mp4`）重新加字幕+调音量，不调付费 API ⑥**用户发来的媒体附件缓存在 `/home/ubuntu/.hermes/cache/documents/` 下，文件名格式 `doc_<hash>_<原文件名>.mp4`**——gateway 日志里搜 `Cached message video resource at` 找到实际路径。**不要假设用户说的视频是项目目录里的某个版本**——0828翻车：用户私聊发了一条视频附件要求去字幕+翻倍音量，助手直接跑去项目目录改 V16，被用户纠正"我让你改的是这个吗"。正确做法：先 grep gateway 日志找 `Cached message` 行拿到用户发来的文件路径，再 ffprobe 确认内容，再动手
+- **⚠️ 识别视频身份必须抽帧+vision看画面，不能只靠音轨参数**（0828严重翻车）：用户发来一条540×960/40s/-23.4dB的视频问"这是哪个版本"，助手只看了音轨参数和文件大小就判定是"男性版素材"——完全判错。实际是通用口播模板成片（我们自己生成发到素材群的），vision抽帧显示是一男一女看电脑的短剧画面。**音轨参数一致≠同一素材**，不同素材可能碰巧音量相近。正确流程：gateway日志→ffprobe→版本表→**抽帧vision看画面→查会话历史确认来源**，五步全走完才能下结论。详见 `references/huolong-version-map.md` 的"识别方法"小节。
+- **私聊里用户发视频附件后说"改字幕/改音量"=改用户发的那条视频**（0828实测纠正）：用户凌晨在飞书私聊发了一条视频附件（缓存在 `~/.hermes/cache/documents/doc_xxx.mp4`），然后说"把原来的小字幕去掉，声音再翻一倍"。助手错误地跑去改内部 V16 项目文件，没改用户发的那条。**根因**：只搜 session_history 和项目目录找最近改的视频，没查 gateway 日志里用户最近发的视频附件。**正确做法**：用户说"改字幕/改音量"时，先 `grep "Cached message video resource" ~/.hermes/logs/agent.log | tail -5` 查用户最近发的视频附件路径，确认 md5 和 ffprobe 规格，再动手改。用户发的视频在 `~/.hermes/cache/documents/` 下，不在项目目录里。详见 `references/delogo-remove-hardcoded-subtitles.md`
+- **⚠️ ASR字幕对齐铁律**（0828定案）：AI生成口播的节奏≠参考原片，字幕时间码不能照搬原片。实测39.8s原片时间码→33.7s AI口播，差6s，后半段每句漂移1-2s。**必须用faster-whisper提取真实语音时间码重建ASS字幕**（medium模型，beam_size=1，CPU约3分钟，large-v3超时）。ASR后人工核验同音错字（漫→慢等）。漏念台词从字幕删不补不猜。详见第6.75节。
+- **飞书 thread 发视频**：素材群 thread ID (`oc_x100...`) 不是 chat_id，直接当 receive_id 发 media 会报 `invalid receive_id`。用 Home 频道的 chat_id (`oc_c3e8253f...`) 发。
+- **"字幕太小"先查 MarginV 不是 Fontsize**：客户说字幕小，第一反应是改 Fontsize，但实际多半是 MarginV 太大（字幕太靠下）。先 grep Style 行对比通用模板的 MarginV。
+- **"音量太小"先查 BGM volume 不是整体音量**：客户说音量小，先查合成脚本里 BGM 的 volume 参数——>1.0 就是在放大BGM盖人声。人声源本身可能-17dB偏低，需要 loudnorm 提上来。
+- **mixkit_350/443/682/690/834 等 ffprobe 返回空 duration**：某些 mixkit mp3 的 VBR 头 ffmpeg 解析不出 duration，但不影响使用，`atrim=0:40.5` 裁到目标时长即可。
+- **Incompetech曲名命中率约43%**：不是所有猜的曲名都能命中，404是正常的。批量下载后ffprobe验证比预检URL更可靠（有些404页面返回200但内容是HTML）。
+- **Pixabay从Linux服务器不可用**（0826实测）：Cloudflare拦截，浏览器和curl都过不去。不要浪费时间试Pixabay，直接用Incompetech。
+- **IA下载文件名必须URL encode**（0826实测）：Internet Archive 文件名含空格/括号时，不URL encode返回0字节不报错——静默失败。必须 `quote(filename)`，下载后检查文件大小。<10KB一定是失败。
+- **⚠️ "50秒平台介绍版" ≠ "40秒模板填剧版"**（0828翻车4）：用户说"把50秒压到40秒的那个版本"，但磁盘上的40s版（`口播_合片_v3.mp4`）跟50s版（`huolong_original_master_50s.mp4`）内容完全不同——50s版纯介绍平台卖点（"没有任何限制""丝滑流畅"），40s版绑了具体剧名（"看《千劫问道》"）。不是同一素材的不同时长版本。"50秒压到40秒"的版本磁盘上不存在。用户说"那个版本"时先抽帧vision对比内容，不要拿内容不同的40s版顶替。详见 `references/huolong-version-map.md` 第7-8条。
+- **session_search 查不到更早会话的具体用户原话**（0828实测）：state.db 只保存当前和最近会话，更早的已归档到 handoff JSON（只含摘要）。找不到用户几轮前说过的原话就承认找不到，问要不要重新做，不要靠记忆猜。

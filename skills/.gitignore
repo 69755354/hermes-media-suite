@@ -1,0 +1,6 @@
+.usage.json*
+**/__pycache__/
+*.py[cod]
+*.cache
+.cache/
+**/.cache/

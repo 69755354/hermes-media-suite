@@ -1,0 +1,20 @@
+[Unit]
+Description=Python HTTP Service (template)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/path/to/app
+Environment=PORT=1888
+ExecStart=/usr/bin/python3 /path/to/app.py
+Restart=always
+RestartSec=3
+MemoryHigh=600M
+MemoryMax=800M
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
