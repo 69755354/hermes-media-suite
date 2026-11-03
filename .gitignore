@@ -1,30 +1,14 @@
-# secrets / runtime data
+# secrets & runtime data
 .env
 *.env
-control.db
-*.db
+**/data/*.db
+*.sqlite
 *.sqlite3
-*.sqlite3-*
-*.log
-*.log.*
-
-# python
 __pycache__/
-*.py[cod]
-.venv/
-.pytest_cache/
-
-# build / evidence artifacts
-build_*/
-publish_pkg/
-backups/
+*.pyc
+*.bak
+*.bak_*
 evidence/
-review/
-*.zip
-
-# local state
-state/
-work/
-profiles/
-runtime/
-jobs/
+run/
+backups/
+.DS_Store
