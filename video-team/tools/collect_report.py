@@ -3,8 +3,9 @@
 """数据组执行器：取数 → 20 列作品表。不发飞书、不刷屏，只交文件。"""
 import argparse, base64, os, re, subprocess, sys, time
 
-BOT_DIR = "/home/ubuntu/workflow/projects/feishu_publish_bot"
-BUILD = "/home/ubuntu/workflow/projects/win-agent-package-20261015/scripts/build_two_account_table.py"
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BOT_DIR = os.environ.get("FEISHU_BOT_DIR") or os.path.join(_ROOT, "publish-control", "feishu_publish_bot")
+BUILD = os.environ.get("BUILD_TWO_ACCOUNT_SCRIPT") or os.path.join(_ROOT, "video-team", "tools", "build_two_account_table.py")
 sys.path.insert(0, BOT_DIR)
 
 

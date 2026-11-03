@@ -14,6 +14,12 @@ import io, ntpath, tempfile, threading, json, re, sys, time, hashlib, urllib.par
 
 import receipt_issue
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+HERMES_CONFIG = os.environ.get("HERMES_CONFIG") or os.path.join(
+    os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "config.yaml")
+BUILD_TWO_ACCOUNT = os.environ.get("BUILD_TWO_ACCOUNT_SCRIPT") or os.path.join(
+    os.path.dirname(os.path.dirname(_HERE)), "video-team", "tools", "build_two_account_table.py")
+
 try:  # \u5141\u8bb8\u5728\u6ca1\u6709\u98de\u4e66 SDK \u7684\u73af\u5883\u91cc\u505a\u8def\u7531/\u89e3\u6790\u5355\u6d4b
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import *
@@ -2298,7 +2304,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-flash")
 LLM_KEY = ""
 try:
     import re as _re
-    _cfg = open("/home/ubuntu/.hermes/config.yaml", encoding="utf-8").read()
+    _cfg = open(HERMES_CONFIG, encoding="utf-8").read()
     _m = _re.search(r"api_key:\s*(sk-[A-Za-z0-9]+)", _cfg)
     if _m:
         LLM_KEY = _m.group(1)
@@ -2464,7 +2470,7 @@ def collect_and_report(chat_id, customer_id=None):
             reply(chat_id, "\u4e24\u4e2a\u53f7\u90fd\u6ca1\u5bfc\u51fa\u6570\u636e\uff08\u6ca1\u767b\u5f55\uff09\uff0c\u5148\u5728\u9762\u677f\u767b\u4e00\u4e0b\u3002")
             return
         out = "/tmp/\u4e24\u4e2a\u53f7\u4f5c\u54c1_%s.xlsx" % day
-        cmd = ["python3", "/home/ubuntu/workflow/projects/win-agent-package-20261015/scripts/build_two_account_table.py",
+        cmd = ["python3", BUILD_TWO_ACCOUNT,
                "--douyin"] + paths + ["--labels", ",".join(labels), "--out", out]
         if star_ok:
             cmd += ["--star", "/tmp/xt.json"]
@@ -7499,7 +7505,7 @@ def on_message(data: P2ImMessageReceiveV1) -> None:
         chat_id = msg.chat_id
         print("[msgtype] chat=%s type=%s" % (chat_id, msg.message_type), flush=True)
         try:
-            with open("/home/ubuntu/workflow/projects/feishu_publish_bot/event_raw.log", "a", encoding="utf-8") as _ef:
+            with open(os.path.join(_HERE, "event_raw.log"), "a", encoding="utf-8") as _ef:
                 _ef.write("%s chat=%s type=%s chat_type=%s content=%s\n" % (
                     time.strftime("%H:%M:%S"), chat_id, msg.message_type,
                     getattr(msg, "chat_type", ""), str(msg.content)[:200]))

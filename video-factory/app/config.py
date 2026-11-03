@@ -10,9 +10,9 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 # 独立部署时源码目录不再嵌套于 workflow/projects；允许运维显式绑定
 # 工作流单一事实源，同时保留原仓库布局的默认推导。
-_repo_candidate = ROOT_DIR.parents[1]
+_repo_candidate = ROOT_DIR.parents[0]
 if not (_repo_candidate / "wiki" / "spec" / "WORKFLOW_REGISTRY.yaml").is_file():
-    _repo_candidate = Path("/home/ubuntu/workflow")
+    _repo_candidate = Path.home() / "workflow"
 REPO_ROOT = Path(
     os.environ.get("XG_FACTORY_WORKFLOW_ROOT", str(_repo_candidate))
 ).resolve()
@@ -150,7 +150,7 @@ def remote_codex_script() -> str:
     """广州业务节点调用新加坡 Codex 的唯一包装入口。"""
     return os.environ.get(
         "XG_FACTORY_REMOTE_CODEX_SCRIPT",
-        "/home/ubuntu/.hermes/scripts/codex_remote.sh",
+        str(Path.home() / ".hermes" / "scripts" / "codex_remote.sh"),
     ).strip()
 
 
@@ -180,6 +180,6 @@ def execution_ssh_key() -> Path:
     return Path(
         os.environ.get(
             "XG_FACTORY_EXECUTION_SSH_KEY",
-            "/home/ubuntu/.hermes/profiles/customer/home/.ssh/id_ed25519",
+            str(Path.home() / ".ssh" / "id_ed25519"),
         )
     ).resolve()

@@ -35,6 +35,7 @@ from .humanize import Humanizer, get_pace_profile
 from .stage2_ledger import Stage2Ledger, content_hash, idempotency_key
 from .idempotency import material_fingerprint, publish_key
 from . import xingtu_tasks
+from .version import VERSION
 from .publish_guard import (PublishHoldStore, UploadAttempt, classify_fault,
                             make_upload_attempt, media_metadata, ffprobe_media_metadata,
                             transcode_failure_reasons, upload_failure_reasons,
@@ -417,7 +418,13 @@ XINGTU_PICKER_OPEN_TEXTS = ("\u8bf7\u9009\u62e9\u661f\u56fe\u4efb\u52a1",
 XINGTU_REPLACE_TEXTS = ("\u66f4\u6362",)
 XINGTU_SEARCH_SELECTOR = 'input[placeholder="\u8f93\u5165\u4efb\u52a1id/\u4efb\u52a1\u540d\u79f0"]'
 XINGTU_PORTAL_SELECTOR = 'div[class*="semi-portal"]'
-XINGTU_CARD_SELECTOR = 'div[class*="card-container"]'
+#: The picker is one exact Semi Design portal.  Use the exact class for the
+#: selection contract; ``class*=`` also matches inner wrappers and must never
+#: be used to decide "there is only one portal".
+XINGTU_PICKER_PORTAL_SELECTOR = 'div.semi-portal'
+XINGTU_CARD_SELECTOR = 'div[class*="card-container-"]'
+XINGTU_CARD_CLASS_RE = (r"^card-container-(?!creator-layout(?:$|-))"
+                        r"[A-Za-z0-9_-]{4,}$")
 XINGTU_TASK_NAME_SELECTOR = '[class*="task-name"]'
 XINGTU_TASK_TITLE_SELECTOR = ('[class*="task-name"], [class*="taskName"], '
                               '[class*="task-title"], [class*="task_title"]')
@@ -1997,9 +2004,20 @@ def _xingtu_modal_open(page):
 
 
 def _xingtu_card_rows(page):
-    """Return observed task-card rows without inventing DOM attributes."""
+    """SELECTION contract: cards inside the one visible star-task portal.
+
+    Each card also keeps ``data-xt-idx`` as a human/debug handle; selection
+    itself is bound to the portal/card identity markers below.
+
+    The picker contract is deliberately separate from the mount contract in
+    ``_xingtu_mount_contract``.  Selection cards live in ``.semi-portal``; if
+    that portal is absent or ambiguous this returns [] and the caller fails
+    closed.  It never falls back to the whole document: the publish form's
+    layout wrapper also carries ``card-container-*`` and would be mistaken for
+    a pickable task.
+    """
     try:
-        return page.evaluate("""({cardSel, radioSel, titleSel}) => {
+        return page.evaluate("""({portalSel, cardSel, cardClassRe, radioSel, titleSel}) => {
 """ + xingtu_tasks.XINGTU_VISIBLE_CARD_NAME_JS + """
           const titleText = (el, card) => {
             if (!el || !__xingtuVisible(el)) return '';
@@ -2021,27 +2039,58 @@ def _xingtu_card_rows(page):
             }
             return values;
           };
-          // The page layout also carries a "card-container-creator-layout"
-          // wrapper, so a document-wide query returns the whole form as one
-          // "card" and every task match fails.  Scope to the visible star-task
-          // portal and keep only real task cards (they carry "任务:").
-          const portals = Array.from(document.querySelectorAll('.semi-portal'))
-              .filter(el => /\u661f\u56fe\u4efb\u52a1/.test(el.innerText || ''));
-          const scope = portals.length ? portals[portals.length - 1] : document;
-          const cards = Array.from(scope.querySelectorAll(cardSel)).filter(card => {
+          // Exactly one visible portal whose text names the star-task picker.
+          // Zero or multiple portals is ambiguous -> return no rows and let
+          // the caller fail closed instead of clicking anywhere else.
+          const portals = Array.from(document.querySelectorAll(portalSel))
+              .filter(el => __xingtuVisible(el) &&
+                  /\u661f\u56fe\u4efb\u52a1/.test(
+                      el.innerText || el.textContent || ''));
+          // Nested wrapper portals collapse to the one outermost instance.
+          const roots = portals.filter(el => !portals.some(other =>
+              other !== el && other.contains(el)));
+          if (roots.length !== 1) return [];
+          const scope = roots[0];
+          // DOM-object identity survives reads, but never transfers to a new
+          // portal/card even when a framework copies old data attributes.
+          const newIdentity = () => {
+            if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+              try { return window.crypto.randomUUID(); } catch (err) {}
+            }
+            let hex = '';
+            for (let i = 0; i < 32; i++) {
+              hex += Math.floor(Math.random() * 16).toString(16);
+            }
+            return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' +
+                hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' +
+                hex.slice(20, 32);
+          };
+          const identity = el => {
+            if (!window.__xtIdentities) window.__xtIdentities = new WeakMap();
+            if (!window.__xtIdentities.has(el))
+              window.__xtIdentities.set(el, newIdentity());
+            return window.__xtIdentities.get(el);
+          };
+          const portalId = identity(scope);
+          scope.setAttribute('data-xt-portal-id', portalId);
+          const cards = __xingtuTaskCards(scope, cardSel, cardClassRe).filter(card => {
             const text = card.innerText || '';
-            return /\u4efb\u52a1[:\uff1a]/.test(text) && text.length < 800;
+            return text.length < 800;
           });
           return cards.map((card, index) => {
             // Deterministic handle for the click step: a document-wide nth()
             // picks the page layout wrapper instead of the picker card.
+            const cardId = identity(card);
             card.setAttribute('data-xt-idx', String(index));
+            card.setAttribute('data-xt-card-id', cardId);
             const radio = card.querySelector(radioSel);
             const visible = __xingtuVisible(card);
             const name = __xingtuCardName(card);
             const orderIds = __xingtuCardOrderIds(card);
             return {
               index: index,
+              portal_id: portalId,
+              card_id: cardId,
               name: name,
               titles: cardTitles(card),
               text: __xingtuVisibleText(card),
@@ -2053,7 +2102,9 @@ def _xingtu_card_rows(page):
               visible: visible
             };
           });
-        }""", {"cardSel": XINGTU_CARD_SELECTOR,
+        }""", {"portalSel": XINGTU_PICKER_PORTAL_SELECTOR,
+                "cardSel": XINGTU_CARD_SELECTOR,
+                "cardClassRe": XINGTU_CARD_CLASS_RE,
                 "radioSel": XINGTU_RADIO_SELECTOR,
                 "titleSel": XINGTU_TASK_TITLE_SELECTOR})
     except Exception:
@@ -2084,8 +2135,16 @@ def _xingtu_stage(driver, stage, **fields):
         pass
 
 
-def _xingtu_page_task_readback(page, task):
-    """Read visible publish-form text, excluding the task picker itself."""
+def _xingtu_mount_contract(page, task):
+    """MOUNT contract: evidence from the publish form, never the picker.
+
+    The published form renders the attached task as one ``card-container-*``
+    block outside any picker portal, whose text starts with ``任务:`` and whose
+    wrapper carries the ``更换`` / ``删除`` controls.  Mount is proven when that
+    block is unique, its name relates to the expected one, and the
+    ``请选择星图任务`` placeholder is gone.  A card inside the picker is NOT
+    mount evidence.
+    """
     expected = _xingtu_task_label((task or {}).get("task_name"))
     result = {"found": False, "actual": "", "expected": expected, "ok": False,
               "readback_via": "", "page_url": _page_url_value(page),
@@ -2093,55 +2152,56 @@ def _xingtu_page_task_readback(page, task):
     if not expected:
         return result
     try:
-        value = page.evaluate(r"""({expectedName, portalSel}) => {
+        value = page.evaluate(r"""({expectedName}) => {
 """ + xingtu_tasks.XINGTU_VISIBLE_CARD_NAME_JS + r"""
-          // A common app wrapper can contain both the form and the picker.
-          // Exclude actual popup roots, never ancestors by their aggregate text.
-          const inPicker = el => !!el.closest(
-              portalSel + ',[role="dialog"]');
-          const visible = el => {
-            if (!el || inPicker(el) || !__xingtuVisible(el)) return false;
-            for (let node = el; node; node = node.parentElement) {
-              const style = getComputedStyle(node);
-              if (style.display === 'none' || style.visibility === 'hidden' ||
-                  Number(style.opacity || 1) === 0 ||
-                  /^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT)$/.test(node.tagName)) return false;
+          const clean = value => String(value || '')
+              .replace(/\u200b/g, '').replace(/\s+/g, '');
+          const outsidePicker = el => !el.closest(
+              '.semi-portal,[role="dialog"],.semi-modal');
+          const placeholder = Array.from(document.querySelectorAll('div,span,p'))
+              .some(el => __xingtuVisible(el) && outsidePicker(el) &&
+                          clean(el.innerText) === '请选择星图任务');
+          const expected = __xingtuNormalize(expectedName || '');
+          const related = actual => !!actual && !!expected &&
+              (actual === expected || actual.indexOf(expected) >= 0 ||
+               expected.indexOf(actual) >= 0);
+          const blocks = [];
+          for (const card of document.querySelectorAll('[class*="card-container"]')) {
+            if (!__xingtuVisible(card) || !outsidePicker(card)) continue;
+            if (/creator-layout/.test(String(card.className || ''))) continue;
+            const text = clean(card.innerText);
+            if ((text.match(/任务[:：]/g) || []).length !== 1) continue;
+            const nameEl = card.querySelector('[class*="task-name-"]') || card;
+            const actual = __xingtuNormalize(nameEl.innerText || '');
+            if (!actual) continue;
+            let block = null;
+            for (let node = card, depth = 0; node && depth < 3;
+                 node = node.parentElement, depth++) {
+              const t = clean(node.innerText);
+              if (/更换/.test(t) && /删除/.test(t)) { block = node; break; }
             }
-            return true;
-          };
-          const text = root => {
-            const chunks = [];
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-            let node;
-            while ((node = walker.nextNode())) {
-              if (visible(node.parentElement)) chunks.push(node.nodeValue || '');
-            }
-            return chunks.join('');
-          };
-          const names = Array.from(document.querySelectorAll('[class*="task-name"]'))
-              .filter(visible).map(el => __xingtuNormalize(text(el))).filter(Boolean);
-          const pageText = __xingtuNormalize(text(document.body));
-          const pageHasExpected = pageText.includes(expectedName);
-          const finish = (actual, via, ok) => ({found: !!actual, actual, ok,
-              readback_via: via, task_name_nodes: names,
-              page_has_expected: pageHasExpected});
-          const exact = names.find(name => name === expectedName);
-          if (exact) return finish(exact, 'task_name', true);
-          const labels = Array.from(document.querySelectorAll('body *'))
-              .filter(visible).map(el => text(el).normalize('NFKC').trim())
-              .filter(value => /^任务\s*:/.test(value))
-              .map(__xingtuNormalize).filter(value => value.includes(expectedName));
-          // Prefer the smallest matching node over a container's combined text.
-          labels.sort((a, b) => a.length - b.length);
-          if (labels.length) return finish(labels[0], 'task_prefix', true);
-          if (pageHasExpected) return finish(expectedName, 'page_text', true);
-          return finish(names[0] || '', names.length ? 'task_name' : '', false);
-        }""", {"expectedName": expected, "portalSel": XINGTU_PORTAL_SELECTOR})
+            if (!block) continue;
+            blocks.push({actual, node: card});
+          }
+          const names = blocks.map(item => item.actual);
+          const finish = (actual, via, ok, list) => ({found: !!actual,
+              actual, ok, readback_via: via, task_name_nodes: list || [],
+              page_has_expected: !!expected && (list || []).indexOf(expected) >= 0});
+          if (placeholder) return finish('', 'placeholder_visible', false, names);
+          if (blocks.length !== 1) return finish('', 'form_block_ambiguous', false, names);
+          const winner = blocks[0];
+          return finish(winner.actual, 'form_card', related(winner.actual), names);
+        }""", {"expectedName": expected})
         if isinstance(value, dict):
             result.update(value)
     except Exception:
         pass
     return result
+
+
+def _xingtu_page_task_readback(page, task):
+    """Read the mounted form through the shared mount contract."""
+    return _xingtu_mount_contract(page, task)
 
 
 def _xingtu_fill_match_rows(rows, task):
@@ -2226,6 +2286,110 @@ def _xingtu_close_picker(page, timeout=2.0):
                           timeout=1.0))
 
 
+def _xingtu_requires_live_enumeration(task):
+    """Family tokens are only safe after a live uniqueness check.
+
+    order_id and full_name are exact identities, so an already mounted block
+    can be trusted for them.  A family token is a category and must still be
+    enumerated to prove that exactly one live card exists.
+    """
+    try:
+        selector = xingtu_tasks.task_selector(task)
+    except Exception:
+        return True
+    return selector.get("kind") == "family_token"
+
+
+def preflight_xingtu_selection(page, task, *, driver=None, timeout=20.0):
+    """Read-only picker preflight: enumerate, resolve, close, never select.
+
+    ``deferred`` means the picker is not available yet on the upload entry
+    page.  The caller retries after upload and before the publish button, so
+    no publish can happen without a successful preflight.
+    """
+    task = dict(task or {})
+    task_name = str(task.get("task_name") or "").strip()
+    order_id = str(task.get("order_id") or "").strip()
+    family = str(task.get("family") or "")
+    token = xingtu_tasks.canonical_task_name(family)
+    expected = xingtu_tasks.normalize_task_name(task_name or order_id or token)
+    if not expected:
+        return {"status": "deferred", "available": False,
+                "code": "XINGTU_TASK_PREFLIGHT_DEFERRED",
+                "reason": "selector_missing", "resolved_identity": None,
+                "candidates": []}
+
+    already_attached = (_xingtu_page_shows_task(page, task)
+                        or _xingtu_deeplink_attached(page, task))
+    if already_attached and not _xingtu_requires_live_enumeration(task):
+        identity = ({"kind": "order_id", "value": order_id,
+                     "display_name": task_name or order_id}
+                    if order_id else
+                    {"kind": "full_name",
+                     "value": xingtu_tasks.normalize_task_name(
+                         task.get("task_name_full") or task_name),
+                     "display_name": task_name})
+        outcome = {"status": xingtu_tasks.RESOLVE_OK, "rows": [], "matches": [],
+                   "code": "OK", "candidates": [], "reason": "already_attached",
+                   "resolved_identity": identity, "available": True,
+                   "already_attached": True}
+        _xingtu_stage(driver, "xingtu.preflight", result="ok",
+                      reason="already_attached", expected=expected)
+        return outcome
+
+    opened = _xingtu_open_picker(page, timeout)
+    if not opened:
+        _xingtu_stage(driver, "xingtu.preflight", result="deferred",
+                      reason="picker_not_ready", expected=expected)
+        return {"status": "deferred", "available": False,
+                "code": "XINGTU_TASK_PREFLIGHT_DEFERRED",
+                "reason": "picker_not_ready", "resolved_identity": None,
+                "candidates": []}
+
+    outcome = None
+    try:
+        _xingtu_fill_search(page, task_name or order_id)
+
+        def resolved():
+            outcome = xingtu_tasks.match_picker_rows(
+                _xingtu_card_rows(page), task)
+            if outcome.get("status") == xingtu_tasks.RESOLVE_NOT_FOUND:
+                return None
+            return outcome
+
+        outcome = _wait_for(resolved, page, timeout=timeout)
+        if outcome is None:
+            try:
+                search = page.locator(XINGTU_SEARCH_SELECTOR).first
+                search.fill("")
+                _pause_page(page)
+            except Exception:
+                pass
+            outcome = _wait_for(resolved, page, timeout=min(8.0, float(timeout)))
+        if outcome is None:
+            outcome = xingtu_tasks.match_picker_rows(
+                _xingtu_card_rows(page), task)
+        outcome = dict(outcome or {})
+        outcome["available"] = True
+        _xingtu_stage(
+            driver, "xingtu.preflight",
+            result=outcome.get("status"), expected=expected,
+            reason=outcome.get("reason"),
+            count=len(outcome.get("candidates") or []),
+            names=[item.get("task_name") for item in
+                   (outcome.get("candidates") or [])[:8]])
+        return outcome
+    finally:
+        closed = _xingtu_close_picker(page, timeout=min(5.0, float(timeout)))
+        # Never mask the resolver failure with a cleanup failure.  Only a
+        # clean preflight that cannot close its own modal is a new error.
+        if (not closed and sys.exc_info()[0] is None
+                and (outcome is None
+                     or outcome.get("status") == xingtu_tasks.RESOLVE_OK)):
+            raise xingtu_tasks.XingtuTaskChanged(
+                "只读任务预检后无法关闭星图任务弹窗，已停止发布")
+
+
 def _xingtu_fill_search(page, search_text):
     """Optionally type into the picker search; absence is not a failure."""
     if not search_text:
@@ -2256,31 +2420,161 @@ def _xingtu_fill_search(page, search_text):
     return True
 
 
+def _xingtu_row_identity(row):
+    """Stable identity for a picker row: order id, else task name.
+
+    ``data-xt-idx`` is reassigned on every DOM read/re-render, so it is only a
+    click handle, never an identity for selection/readback.
+    """
+    order = str((row or {}).get("order_id") or "").strip()
+    if order:
+        return ("order", order)
+    name = _xingtu_task_label((row or {}).get("name"))
+    if name:
+        return ("name", name)
+    return None
+
+
+def _xingtu_row_matches(row, identity):
+    if not identity:
+        return False
+    return _xingtu_row_identity(row) == identity
+
+
+def _xingtu_current_row(page, row):
+    """Re-resolve *row* by identity; None when it is gone or ambiguous."""
+    identity = _xingtu_row_identity(row)
+    if not identity:
+        return None
+    matches = [item for item in _xingtu_card_rows(page)
+               if _xingtu_row_matches(item, identity)
+               and row.get("portal_id") and row.get("card_id")
+               and item.get("portal_id") == row["portal_id"]
+               and item.get("card_id") == row["card_id"]]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _xingtu_row_selected(page, row):
+    current = _xingtu_current_row(page, row)
+    return bool(current and current.get("checked"))
+
+
+def _xingtu_marked_row(page, portal_id, card_id):
+    """Read one card through the exact portal/card markers, never a fresh query."""
+    import re
+    values = (str(portal_id or ""), str(card_id or ""))
+    if not all(re.fullmatch(r"[0-9a-f-]{36}", value) for value in values):
+        return None
+    try:
+        value = page.evaluate("""({portalId, cardId, radioSel}) => {
+""" + xingtu_tasks.XINGTU_VISIBLE_CARD_NAME_JS + r"""
+          const portals = Array.from(
+              document.querySelectorAll('[data-xt-portal-id]')).filter(
+              el => el.getAttribute('data-xt-portal-id') === portalId);
+          if (portals.length !== 1 || !__xingtuVisible(portals[0])) return null;
+          const cards = Array.from(
+              portals[0].querySelectorAll('[data-xt-card-id]')).filter(
+              el => el.getAttribute('data-xt-card-id') === cardId);
+          if (cards.length !== 1 || !__xingtuVisible(cards[0])) return null;
+          const card = cards[0];
+          if (!window.__xtIdentities ||
+              window.__xtIdentities.get(portals[0]) !== portalId ||
+              window.__xtIdentities.get(card) !== cardId) return null;
+          const live = Array.from(document.querySelectorAll('.semi-portal'))
+              .filter(el => __xingtuVisible(el) && /星图任务/.test(el.innerText || el.textContent || ''));
+          const roots = live.filter(el => !live.some(other => other !== el && other.contains(el)));
+          if (roots.length !== 1 || roots[0] !== portals[0]) return null;
+          const radio = card.querySelector(radioSel);
+          const orderIds = __xingtuCardOrderIds(card);
+          return {
+            portal_id: portalId,
+            card_id: cardId,
+            name: __xingtuCardName(card) || __xingtuNormalize(
+                __xingtuVisibleText(card)),
+            text: __xingtuVisibleText(card),
+            order_id: orderIds.length === 1 ? orderIds[0] : '',
+            order_ids: orderIds,
+            checked: !!(radio && String(radio.className || '').indexOf(
+                'semi-radio-checked') >= 0) || !!card.querySelector(
+                'input[type=radio]:checked, [aria-checked="true"], [aria-selected="true"]'),
+            visible: true
+          };
+        }""", {"portalId": values[0], "cardId": values[1],
+                "radioSel": XINGTU_RADIO_SELECTOR})
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _xingtu_select_fill_row(page, row, *, wait_for_selection=True):
-    card = page.locator('[data-xt-idx="%d"]' % int(row["index"])).first
-    radio = card.locator(XINGTU_RADIO_SELECTOR).first
+    # Resolve the row by identity immediately before clicking.  A refresh may
+    # have reassigned every data-xt-idx; clicking the old number would hit the
+    # wrong card or nothing.
+    current = _xingtu_current_row(page, row)
+    if current is None:
+        return None
+    import re
+    portal_id, card_id = current["portal_id"], current["card_id"]
+    if not all(re.fullmatch(r"[0-9a-f-]{36}", value) for value in (portal_id, card_id)):
+        return None
+    portal = page.locator('[data-xt-portal-id="%s"]' % portal_id)
+    card = portal.locator('[data-xt-card-id="%s"]' % card_id)
+    if portal.count() != 1 or card.count() != 1:
+        return None
+    card = card.element_handle()
+    if card is None or not card.evaluate("""(el, ids) => el.isConnected &&
+        window.__xtIdentities && window.__xtIdentities.get(el) === ids[1] &&
+        window.__xtIdentities.get(el.closest('[data-xt-portal-id]')) === ids[0]
+        """, [portal_id, card_id]):
+        return None
+    radio = card.query_selector(XINGTU_RADIO_SELECTOR)
+    radio_label = card.query_selector("label.semi-radio")
+
     def selected_card():
-        for item in _xingtu_card_rows(page):
-            if item.get("index") == row["index"] and item.get("checked"):
-                return item
+        fresh = _xingtu_marked_row(page, portal_id, card_id)
+        return fresh if (fresh and fresh.get("checked") and
+                         _xingtu_row_identity(fresh) == _xingtu_row_identity(current)) else None
+
+    def committed():
+        """Checked radio, or the picker closed (selection committed)."""
+        fresh = _wait_for(selected_card, page,
+                          timeout=3.0 if wait_for_selection else 2.0)
+        if fresh:
+            return fresh
+        if not _xingtu_modal_open(page):
+            return current
         return None
 
-    for target in (card, radio):
+    # The card container itself is not the activation target in the Douyin
+    # picker: a real click on `div.card-container-*` leaves the wrapped
+    # `label.semi-radio > input[type=radio]` unchecked and the modal open, and
+    # fill mode used to accept that as success because it never re-read the
+    # radio.  Click the radio label first (the only target that actually
+    # toggles the input), then the radio, and the card last.
+    for target in (radio_label, radio, card):
+        if target is None:
+            continue
         if xingtu_tasks.click_picker_element(target):
-            # Fill mode verifies the form after allowing auto-close. Do not
-            # click a second target merely because the removed radio is unreadable.
-            if not wait_for_selection or _wait_for(selected_card, page, timeout=3.0):
-                return True
-    return False
+            fresh = committed()
+            if fresh:
+                return fresh
+    return None
 
 
-def _xingtu_confirm_picker(page, timeout):
+def _xingtu_confirm_picker(page, timeout, row=None):
     # Allow auto-close before looking for an optional confirmation button.
     close_timeout = min(1.5, max(0.0, float(timeout)))
     if _wait_for(lambda: not _xingtu_modal_open(page), page,
                  timeout=close_timeout):
         return True
-    confirm = page.locator(XINGTU_CONFIRM_SELECTOR)
+    if not row or not _xingtu_current_row(page, row):
+        return False
+    portal = page.locator('[data-xt-portal-id="%s"]' % row["portal_id"])
+    if portal.count() != 1:
+        return False
+    confirm = portal.locator('button')
     confirm_locator = None
     for index in range(confirm.count()):
         item = confirm.nth(index)
@@ -2291,7 +2585,7 @@ def _xingtu_confirm_picker(page, timeout):
         except Exception:
             continue
     if confirm_locator is None:
-        confirmed = {"ok": _xingtu_click_texts(page, ("\u786e\u5b9a",))}
+        return False
     else:
         confirmed = {"ok": xingtu_tasks.click_picker_element(confirm_locator)}
     if not confirmed.get("ok"):
@@ -2339,7 +2633,9 @@ def _select_publish_xingtu_task_fill(page, task, *, driver=None, timeout=20.0):
 
             def match():
                 outcome = _xingtu_fill_match_rows(_xingtu_card_rows(page), task)
-                return outcome if outcome.get("rows") else None
+                if outcome.get("status") == xingtu_tasks.RESOLVE_NOT_FOUND:
+                    return None
+                return outcome
 
             outcome = _wait_for(match, page, timeout=timeout)
             rows = _xingtu_card_rows(page)
@@ -2347,20 +2643,33 @@ def _select_publish_xingtu_task_fill(page, task, *, driver=None, timeout=20.0):
             # Freeze counts and titles before clicking; polling must not overwrite them.
             snapshot = _xingtu_picker_diagnostics(page, rows, attempt)
             snapshot.update(popup)
-            if outcome and outcome.get("rows"):
-                row = outcome["rows"][0]
+            if outcome:
+                if outcome.get("status") != xingtu_tasks.RESOLVE_OK:
+                    _xingtu_stage(driver, "xingtu.picker", **dict(
+                        snapshot, reason=outcome.get("reason"),
+                        code=outcome.get("code"),
+                        candidates=outcome.get("candidates")))
+                    xingtu_tasks.raise_match_error(outcome, task)
+                rows_ok = list(outcome.get("rows") or [])
+                if len(rows_ok) != 1:
+                    xingtu_tasks.raise_match_error(
+                        {"status": xingtu_tasks.RESOLVE_AMBIGUOUS,
+                         "code": "XINGTU_TASK_AMBIGUOUS",
+                         "reason": "non_unique_ok", "candidates": []}, task)
+                row = rows_ok[0]
                 _xingtu_stage(driver, "xingtu.pick",
-                              mode=("order_id" if outcome["reason"] == "order_id"
-                                    else "first_of_duplicates"),
-                              n=len(outcome["rows"]), index=0)
+                              mode=outcome.get("reason"), n=1,
+                              resolved_identity=outcome.get("resolved_identity"))
                 if not _xingtu_select_fill_row(page, row, wait_for_selection=False):
-                    failure = "xingtu.card_not_selectable"
+                    raise xingtu_tasks.XingtuTaskChanged(
+                        "星图任务卡在选择时发生变化，已停止发布")
                 else:
-                    _xingtu_confirm_picker(page, timeout)
+                    _xingtu_confirm_picker(page, timeout, row)
 
                     def read_form():
                         nonlocal readback
-                        readback = _xingtu_page_task_readback(page, task)
+                        readback = _xingtu_page_task_readback(
+                            page, dict(task, task_name=row.get("name") or task_name))
                         return readback["ok"]
 
                     _wait_for(read_form, page, timeout=min(15.0, max(0.0, float(timeout))))
@@ -2373,8 +2682,11 @@ def _select_publish_xingtu_task_fill(page, task, *, driver=None, timeout=20.0):
                             snapshot, modal_visible=bool(_xingtu_modal_open(page)),
                             reason="selected"))
                         result = {"selected": True, "already_attached": False,
-                                  "task_name": task_name, "order_id": order_id}
+                                  "task_name": task_name, "order_id": order_id,
+                                  "resolved_identity": outcome.get("resolved_identity")}
                         if driver is not None:
+                            driver._xingtu_resolved_identity = outcome.get(
+                                "resolved_identity")
                             driver._record("xingtu_task",
                                            note="star task selected inside publish page",
                                            extra=dict(result))
@@ -2395,132 +2707,13 @@ def _select_publish_xingtu_task_fill(page, task, *, driver=None, timeout=20.0):
 
 
 def _xingtu_page_shows_task(page, task):
-    """True only when the page exposes an attached-task control state.
+    """MOUNT-ONLY predicate; never accepts a picker card as attached.
 
-    Body text near the task name is never evidence: a heading, a hint, or the
-    picker card can render the same name without anything being attached.
-    Attachment requires a visible selected-state control (``aria-checked`` /
-    ``checked`` / ``.selected`` token).  When the control or its card exposes
-    the target ``order_id``, that id is authoritative and the name is ignored.
-    Only order-id-less tasks fall back to a normalized name comparison that
-    requires exact equality after NFKC, whitespace removal, connector
-    unification and ``任务:`` prefix removal.  The page must not still show the
-    "请选择星图任务" placeholder.  When the DOM cannot prove attachment the
-    answer is False so the caller opens the picker; a failed pick then raises
-    ``XingtuTaskNotAttached``.
+    See ``_xingtu_mount_contract`` for the three same-block facts.  Selection
+    has its own contract in ``_xingtu_card_rows``; the two must not share a
+    selector scope.
     """
-    name = xingtu_tasks.normalize_task_name((task or {}).get("task_name"))
-    order_id = str((task or {}).get("order_id") or "").strip()
-    if not name and not order_id:
-        return False
-    try:
-        try:
-            value = page.evaluate("""(expected) => {
-""" + xingtu_tasks.XINGTU_VISIBLE_CARD_NAME_JS + """
-              const clean = value => String(value || '')
-                  .replace(/\\s+/g, '').replace(/\\u200b/g, '');
-              const normalizeName = __xingtuNormalize;
-              const visible = __xingtuVisible;
-              const inPicker = el => {
-                for (let node = el; node && node !== document.body;
-                     node = node.parentElement) {
-                  const text = clean(node.innerText || node.textContent);
-                  if (text.indexOf('\u9009\u62e9\u661f\u56fe\u4efb\u52a1') >= 0 ||
-                      (node.getAttribute && node.getAttribute('role') === 'dialog')) {
-                    return true;
-                  }
-                }
-                return false;
-              };
-              const prompt = Array.from(document.querySelectorAll('body *'))
-                  .some(el => visible(el) &&
-                      clean(el.innerText || el.textContent)
-                          .indexOf('\u8bf7\u9009\u62e9\u661f\u56fe\u4efb\u52a1') >= 0);
-              if (prompt) return false;
-
-              const expectedName = normalizeName(expected.name || '');
-              const expectedOrder = String(expected.order_id || '').trim();
-              const isSelected = el => {
-                if (el.getAttribute('aria-checked') === 'true') return true;
-                if (el.getAttribute('aria-selected') === 'true') return true;
-                if (el.tagName === 'INPUT' && el.checked === true) return true;
-                const tokens = String(el.className || '').split(/\\s+/);
-                return tokens.indexOf('selected') >= 0;
-              };
-              const cardFor = selected => {
-                const card = selected.closest(expected.cardSel);
-                if (card) return card;
-                const ownText = __xingtuVisibleText(selected);
-                const hasControl = node => Array.from(node.querySelectorAll(
-                    'button,[role=button],a')).some(__xingtuIsControl);
-                for (let node = selected.parentElement;
-                     node && node !== document.body &&
-                     node !== document.documentElement;
-                     node = node.parentElement) {
-                  if (hasControl(node)) return node;
-                  const text = __xingtuVisibleText(node);
-                  if (text && text !== ownText) return node;
-                }
-                return selected;
-              };
-              const cardName = __xingtuCardName;
-              const selectedNodes = Array.from(document.querySelectorAll(
-                  '[aria-checked="true"], [aria-selected="true"], '
-                  + 'input[type=radio]:checked, input[type=checkbox]:checked, '
-                  + '.selected'))
-                  .filter(el => visible(el) && !inPicker(el) && isSelected(el));
-              for (const selected of selectedNodes) {
-                const card = cardFor(selected);
-                const orders = __xingtuCardOrderIds(card);
-                if (orders.length > 1) continue;
-                if (expectedOrder) {
-                  // Order id is authoritative only when every order id found
-                  // on this card (and its nearest ordered ancestor) is the
-                  // requested one.  A second id means the card is ambiguous.
-                  if (orders.length === 1 && orders[0] === expectedOrder) {
-                    return true;
-                  }
-                  continue;
-                }
-                if (!expectedName) continue;
-                // The bot sends a category word ("APP种草") while the attached
-                // card renders the full task title, so equality alone can
-                // never confirm the attachment.
-                const actualName = cardName(card);
-                if (actualName === expectedName ||
-                    (actualName && actualName.indexOf(expectedName) >= 0)) {
-                  return true;
-                }
-              }
-              // Current Douyin UI: the attached task is plain text plus
-              // 更换/删除 controls, with no checked radio at all.  Accept that
-              // shape only when the name matches and the picker is closed.
-              const hasSwitch = Array.from(document.querySelectorAll('body *'))
-                  .some(el => visible(el) && !inPicker(el) &&
-                        /^(\u66f4\u6362|\u5220\u9664)$/.test(
-                            (el.innerText || '').trim()));
-              if (hasSwitch && expectedName) {
-                const rows = Array.from(document.querySelectorAll('body *'))
-                    .filter(el => {
-                      if (!visible(el) || inPicker(el)) return false;
-                      const t = (el.innerText || '').trim();
-                      return /^\u4efb\u52a1[:\uff1a]/.test(t) && t.length < 300;
-                    });
-                for (const node of rows) {
-                  const cardText = normalizeName(node.innerText);
-                  if (cardText && cardText.indexOf(expectedName) >= 0) {
-                    return true;
-                  }
-                }
-              }
-              return false;
-            }""", {"name": name, "order_id": order_id,
-                    "cardSel": XINGTU_CARD_SELECTOR})
-        except TypeError:
-            return False
-        return value is True
-    except Exception:
-        return False
+    return bool(_xingtu_mount_contract(page, task).get("ok"))
 
 
 def _xingtu_flat_text(value):
@@ -2544,8 +2737,8 @@ def _xingtu_deeplink_attached(page, task):
 
     Evidence stays narrow on purpose: the URL must carry exactly our
     ``order_id`` (parsed, not substring-matched, on creator.douyin.com) AND
-    the visible page text must contain our normalized task name next to the
-    更换/删除 controls.
+    one real task card must contain the name, the same order id and the
+    更换/删除 control.  Page-wide text is never accepted as card evidence.
     """
     order_id = str((task or {}).get("order_id") or "").strip()
     name = _xingtu_flat_text(
@@ -2568,12 +2761,7 @@ def _xingtu_deeplink_attached(page, task):
         query = {}
     if order_id not in [str(v).strip() for v in (query.get("order_id") or [])]:
         return False
-    try:
-        body = page.evaluate("() => document.body.innerText || ''") or ""
-    except Exception:
-        return False
-    flat = _xingtu_flat_text(body)
-    return name in flat and ("\u66f4\u6362" in flat or "\u5220\u9664" in flat)
+    return _xingtu_page_shows_task(page, task)
 
 
 def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
@@ -2595,7 +2783,9 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
         raise xingtu_tasks.XingtuTaskNotAttached(
             "xingtu task has neither task_name nor order_id")
 
-    if _xingtu_page_shows_task(page, task) or _xingtu_deeplink_attached(page, task):
+    if ((_xingtu_page_shows_task(page, task)
+         or _xingtu_deeplink_attached(page, task))
+            and not _xingtu_requires_live_enumeration(task)):
         result = {"selected": False, "already_attached": True,
                   "task_name": task_name, "order_id": order_id}
         if driver is not None:
@@ -2633,17 +2823,6 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
     expected = (xingtu_tasks.normalize_task_name(task_name) if task_name
                 else xingtu_tasks.normalize_task_name(order_id))
 
-    def _row_labels(row):
-        values = []
-        for value in [row.get("name")] + list(row.get("titles") or []):
-            label = _xingtu_task_label(value)
-            if label and label not in values:
-                values.append(label)
-        return values
-
-    def _row_text(row):
-        return _xingtu_task_label(row.get("text") or "")
-
     def _visible_cards():
         cards = _xingtu_card_rows(page)
         return [row for row in cards if row.get("visible")]
@@ -2653,35 +2832,56 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
                 for row in _visible_cards()][:8]
 
     def matching_rows():
-        # The bot sends a category word (APP种草 / 免费-新码 / 激励-新码), while
-        # each picker card carries the full task title
-        # (火龙漫剧星广-260916-APP种草-1-优矩互动).  Exact equality can never
-        # match that; fall back to containment and keep exact matches first.
-        exact, contained = [], []
-        for row in _visible_cards():
-            order_ids = list(row.get("order_ids") or [])
-            if len(order_ids) > 1:
+        cards = _xingtu_card_rows(page)
+        outcome = _xingtu_fill_match_rows(cards, task)
+        if outcome.get("status") != xingtu_tasks.RESOLVE_NOT_FOUND:
+            return outcome
+
+        # Compatibility fallback for picker rows whose visible label/text is
+        # not exposed through the shared resolver's title fields.  Exact
+        # matches stay ahead of containment, and the shared resolver still
+        # decides ambiguity/unavailability for the narrowed candidate set.
+        selector = xingtu_tasks.task_selector(task)
+        expected = str(selector.get("value") or "")
+        exact_candidates, contained_candidates = [], []
+        for row in cards:
+            if not row.get("visible"):
                 continue
-            if order_id:
-                if (len(order_ids) == 1 and
-                        str(order_ids[0] or "").strip() == order_id):
-                    exact.append(row)
+            order_ids = [xingtu_tasks.normalize_order_id(value)
+                         for value in (row.get("order_ids") or []) if value]
+            if not order_ids and row.get("order_id"):
+                order_ids = [xingtu_tasks.normalize_order_id(row.get("order_id"))]
+            if selector.get("kind") == "order_id":
+                if expected in order_ids:
+                    exact_candidates.append(row)
                 continue
-            labels = _row_labels(row)
-            text = _row_text(row)
-            if not labels and not text:
-                continue
-            if expected in labels:
-                exact.append(row)
+            labels = [xingtu_tasks.normalize_task_name(row.get("name"))]
+            labels.extend(xingtu_tasks.normalize_task_name(value)
+                          for value in (row.get("titles") or []) if value)
+            labels = [value for value in labels if value]
+            text = xingtu_tasks.normalize_task_name(row.get("text"))
+            if expected and expected in labels:
+                exact_candidates.append(row)
             elif expected and (expected in text or
-                               any(expected in label for label in labels)):
-                contained.append(row)
+                               any(expected in value for value in labels)):
+                contained_candidates.append(row)
+
+        def _resolve(candidates):
+            if not candidates:
+                return None
+            resolved = _xingtu_fill_match_rows(candidates, task)
+            if resolved.get("status") == xingtu_tasks.RESOLVE_NOT_FOUND:
+                return None
+            return resolved
+
+        exact = _resolve(exact_candidates)
+        contained = _resolve(contained_candidates)
         return exact or contained
 
     _xingtu_stage(driver, "xingtu.cards", expected=expected,
                   count=len(_visible_cards()), names=_card_names())
-    rows = _wait_for(matching_rows, page, timeout=timeout)
-    if not rows:
+    outcome = _wait_for(matching_rows, page, timeout=timeout)
+    if not outcome:
         # The picker search filters harder than its own list (it matches task
         # ids, not the category word).  Clear it and match the whole list.
         try:
@@ -2689,37 +2889,73 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
             _pause_page(page)
         except Exception:
             pass
-        rows = _wait_for(matching_rows, page, timeout=min(8.0, float(timeout)))
+        outcome = _wait_for(matching_rows, page, timeout=min(8.0, float(timeout)))
         _xingtu_stage(driver, "xingtu.cards.after_clear", expected=expected,
                       count=len(_visible_cards()), names=_card_names())
-    if not rows:
-        raise xingtu_tasks.XingtuTaskNotAttached(
-            "star task card not found after searching the publish page picker; "
-            "expected=%r visible=%r" % (expected, _card_names()))
-    if order_id and any(not str(item.get("order_id") or "").strip()
-                        for item in rows):
-        raise xingtu_tasks.XingtuTaskNotAttached(
-            "star task cards have no readable order_id; refusing to guess")
-    if len(rows) > 1:
-        # Several tasks of the same type can coexist; skip the ones the card
-        # itself marks as finished and use the first remaining match.  Log every
-        # candidate so a wrong-looking pick stays auditable.
-        unavailable = tuple(getattr(xingtu_tasks, "_UNAVAILABLE_WORDS", ()))
-        usable = [item for item in rows
-                  if not any(word in _row_text(item) for word in unavailable)]
-        rows = usable or rows
+    if not outcome:
+        outcome = xingtu_tasks.match_picker_rows(_xingtu_card_rows(page), task)
+        xingtu_tasks.raise_match_error(outcome, task)
+    if outcome.get("status") != xingtu_tasks.RESOLVE_OK:
         _xingtu_stage(driver, "xingtu.pick.duplicates", expected=expected,
-                      count=len(rows), names=_card_names())
+                      count=len(outcome.get("candidates") or []),
+                      names=_card_names(), code=outcome.get("code"),
+                      reason=outcome.get("reason"))
+        xingtu_tasks.raise_match_error(outcome, task)
+    rows = list(outcome.get("rows") or [])
+    if len(rows) != 1:
+        xingtu_tasks.raise_match_error(
+            {"status": xingtu_tasks.RESOLVE_AMBIGUOUS,
+             "code": "XINGTU_TASK_AMBIGUOUS", "reason": "non_unique_ok",
+             "candidates": outcome.get("candidates") or []}, task)
+    first_identity = outcome.get("resolved_identity")
+    preflight_identity = getattr(driver, "_xingtu_resolved_identity", None) if driver else None
+    if preflight_identity and first_identity != preflight_identity:
+        raise xingtu_tasks.XingtuTaskChanged(
+            "星图任务卡与上传前预检身份不一致，已停止发布")
+    # The picker re-renders when its search filter applies, which reassigns
+    # ``data-xt-idx``.  An index captured before that re-render points at the
+    # wrong card (or none) and the radio click silently misses, surfacing as
+    # "star task card did not become selected" although the card is visible.
+    # Wait for the list to settle and re-resolve the row right before clicking.
+    page.wait_for_timeout(1500)
+    fresh_rows = matching_rows()
+    if not fresh_rows:
+        raise xingtu_tasks.XingtuTaskChanged(
+            "星图任务卡在预检后消失，已停止发布")
+    if fresh_rows.get("status") != xingtu_tasks.RESOLVE_OK:
+        xingtu_tasks.raise_match_error(fresh_rows, task)
+    if fresh_rows.get("resolved_identity") != first_identity:
+        raise xingtu_tasks.XingtuTaskChanged(
+            "星图任务卡在预检后身份发生变化，已停止发布")
+    if (preflight_identity and
+            fresh_rows.get("resolved_identity") != preflight_identity):
+        raise xingtu_tasks.XingtuTaskChanged(
+            "星图任务卡与上传前预检身份不一致，已停止发布")
+    rows = list(fresh_rows.get("rows") or [])
+    if len(rows) != 1:
+        xingtu_tasks.raise_match_error(fresh_rows, task)
     row = rows[0]
-    if order_id and str(row.get("order_id") or "").strip() != order_id:
-        raise xingtu_tasks.XingtuTaskNotAttached(
-            "star task card order_id does not match the requested order")
 
-    if not _xingtu_select_fill_row(page, row):
+    selected = _xingtu_select_fill_row(page, row)
+    if not selected:
+        page.wait_for_timeout(800)
+        retry_rows = matching_rows()
+        if not retry_rows:
+            raise xingtu_tasks.XingtuTaskChanged(
+                "星图任务卡在重试前消失，已停止发布")
+        if retry_rows.get("status") != xingtu_tasks.RESOLVE_OK:
+            xingtu_tasks.raise_match_error(retry_rows, task)
+        retry_cards = list(retry_rows.get("rows") or [])
+        if len(retry_cards) != 1:
+            xingtu_tasks.raise_match_error(retry_rows, task)
+        selected = _xingtu_select_fill_row(page, retry_cards[0])
+        if not selected:
+            raise xingtu_tasks.XingtuTaskChanged(
+                "星图任务卡没有成功选中，已停止发布")
+        row = retry_cards[0]
+    if not selected or not selected.get("checked"):
         raise xingtu_tasks.XingtuTaskNotAttached(
             "star task card did not become selected")
-    selected = next((item for item in _xingtu_card_rows(page)
-                     if item.get("index") == row["index"] and item.get("checked")), {})
     if order_id:
         selected_order = str((selected or {}).get("order_id") or "").strip()
         if not selected_order:
@@ -2730,7 +2966,12 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
                 "selected star task order_id %r does not match %r"
                 % (selected_order, order_id))
 
-    confirm = page.locator(XINGTU_CONFIRM_SELECTOR)
+    if not _xingtu_current_row(page, selected):
+        raise xingtu_tasks.XingtuTaskNotAttached("selected portal/card was replaced")
+    portal = page.locator('[data-xt-portal-id="%s"]' % selected["portal_id"])
+    if portal.count() != 1:
+        raise xingtu_tasks.XingtuTaskNotAttached("selected portal is ambiguous")
+    confirm = portal.locator('button')
     confirm_locator = None
     for index in range(confirm.count()):
         item = confirm.nth(index)
@@ -2758,9 +2999,12 @@ def select_publish_xingtu_task(page, task, *, driver=None, mode="publish",
         raise xingtu_tasks.XingtuTaskNotAttached(
             "selected star task is not shown on the publish page; publish stopped")
 
+    resolved_identity = fresh_rows.get("resolved_identity")
     result = {"selected": True, "already_attached": False,
-              "task_name": task_name, "order_id": order_id}
+              "task_name": task_name, "order_id": order_id,
+              "resolved_identity": resolved_identity}
     if driver is not None:
+        driver._xingtu_resolved_identity = resolved_identity
         driver._record("xingtu_task", note="star task selected inside publish page",
                        extra=dict(result))
     return result
@@ -4748,6 +4992,45 @@ class PlaywrightDriver:
         raise xingtu_tasks.XingtuTaskNotAttached(
             "selected star task is not shown on the upload page; publish stopped before submit")
 
+    def _preflight_xingtu_page(self, plan, operation_mode, *, require=False):
+        """Run read-only live preflight, before upload when possible."""
+        task = xingtu_tasks.task_from_plan(
+            plan, mode=getattr(self, "_operation_mode", operation_mode))
+        if not task:
+            return {"status": "skipped", "available": False}
+        outcome = preflight_xingtu_selection(
+            self._page, task, driver=self,
+            timeout=getattr(self, "_xingtu_preflight_timeout", 20.0))
+        self._xingtu_preflight_outcome = outcome
+        status = outcome.get("status")
+        if status == "deferred":
+            if require:
+                raise xingtu_tasks.XingtuTaskUnavailable(
+                    "上传完成后仍无法进行星图任务只读预检，已停止发布",
+                    details={"reason": outcome.get("reason")})
+            self._record(
+                "xingtu_task", note="read-only task preflight deferred until upload",
+                extra={"reason": outcome.get("reason")})
+            return outcome
+        if status != xingtu_tasks.RESOLVE_OK:
+            xingtu_tasks.raise_match_error(outcome, task)
+        self._xingtu_resolved_identity = outcome.get("resolved_identity")
+        self._record(
+            "xingtu_task", note="read-only task preflight passed before upload",
+            extra={"resolved_identity": self._xingtu_resolved_identity})
+        return outcome
+
+    def _upload_video_with_preflight(self, media, plan, operation_mode):
+        """Gate upload on a read-only task preflight.
+
+        When the publish entry page does not expose the picker yet, the
+        deferred outcome is retried after transcode (see ``fill``), before the
+        cover/task selection and long before the publish button.
+        """
+        outcome = self._preflight_xingtu_page(plan, operation_mode)
+        self._upload_video(media)
+        return outcome
+
     def _xingtu_ledger_path(self):
         """Resolve the local used-task ledger path from the data layout."""
         override = getattr(self, "_xingtu_used_tasks_path", None)
@@ -4812,9 +5095,16 @@ class PlaywrightDriver:
                 name=task_name or order_id,
                 matched=matched.get("task_name") or matched.get("order_id"),
                 matched_by=matched_by,
+                duplicate_kind=matched.get("duplicate_kind"),
+                published_at=matched.get("published_at"),
+                media_sha256_prefix=matched.get("media_sha256_prefix"),
                 matched_order_id=matched.get("order_id") or None)
-            raise xingtu_tasks.XingtuDuplicateLocal(
-                task_name or order_id, matched)
+            error_cls = (xingtu_tasks.XingtuDuplicatePossibleLocal
+                         if "possible" in str(matched_by)
+                         else xingtu_tasks.XingtuDuplicateLocal)
+            raise error_cls(task_name or order_id, matched,
+                            details=dict(matched, task_name=task_name or order_id,
+                                         matched_by=matched_by))
 
         self._xingtu_checked_key = key
         _xingtu_stage(self, "xingtu.dedup", result="ok",
@@ -4844,12 +5134,27 @@ class PlaywrightDriver:
         task = xingtu_tasks.task_from_plan(plan)
         if not task:
             return None
+        identity = getattr(self, "_xingtu_resolved_identity", None)
+        identity = identity if isinstance(identity, dict) else {}
+        if identity.get("kind") == "order_id" and identity.get("value"):
+            task["order_id"] = str(identity["value"])
+            task["task_name_full"] = str(identity.get("display_name") or "")
+        elif identity.get("kind") == "full_name" and identity.get("value"):
+            task["task_name_full"] = str(identity["value"])
         attempt_id = str(getattr(getattr(self, "upload_attempt", None),
                                  "attempt_id", "") or "")
+        if identity.get("kind") == "order_id" and task.get("order_id"):
+            matched_by = "order_id+media"
+        elif task.get("task_name_full"):
+            matched_by = "task_name_full+media"
+        else:
+            matched_by = "legacy_family+media"
         try:
             entry = xingtu_tasks.append_used_task(
                 self._xingtu_ledger_path(), task, attempt_id=attempt_id,
-                media_sha256=str((plan.get("piece") or {}).get("sha256") or ""))
+                media_sha256=str((plan.get("piece") or {}).get("sha256") or ""),
+                client_version=VERSION,
+                matched_by=matched_by)
         except xingtu_tasks.XingtuDedupLedgerError as exc:
             _xingtu_stage(self, "xingtu.dedup", result="ledger_error",
                           phase="record", code=exc.code, error=str(exc),
@@ -4931,12 +5236,19 @@ class PlaywrightDriver:
         self._ensure_upload_page()
         self._verify_account(plan)
         self._dismiss_page_overlays()
+        self._preflight_xingtu_page(plan, operation_mode)
         self._upload_video(media)
         self._dismiss_page_overlays()
         self._fill_title(title)
         self._fill_description(piece)
         self._finalize_upload_evidence()
         self._wait_transcode()
+        if (getattr(self, "_xingtu_preflight_outcome", {}) or {}).get(
+                "status") == "deferred":
+            # Upload finished; the form now exists.  A second read-only
+            # preflight must pass before cover/task selection and, critically,
+            # before the publish button.
+            self._preflight_xingtu_page(plan, operation_mode, require=True)
         self._choose_cover(piece.get("covers") or {})
         task = xingtu_tasks.task_from_plan(plan, mode=operation_mode)
         if task:
@@ -8668,7 +8980,6 @@ class PlaywrightDriver:
 
     def _choose_cover(self, covers, *, cover_ai=None):
         """Recommended frame by default; legacy upload/AI only when opted in."""
-        self._wait_upload_blocking_clear()
         covers = self._cover_requested_paths(covers)
         if (not any(bool(value) for value in (covers or {}).values())
                 and not self._cover_upload_enabled()
@@ -8684,6 +8995,9 @@ class PlaywrightDriver:
             self._safe_record("cover", note="SKIP: no cover requested")
             return {"ok": True, "skipped": True,
                     "reason": "no_cover_requested"}
+        # Only a real cover request needs the upload/transcode settle wait.
+        # The main publish chain still performs its own transcode gate.
+        self._wait_upload_blocking_clear()
         self._dismiss_page_overlays()
         self._cover_warning = None
         self._cover_bound_src = None

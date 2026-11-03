@@ -6,7 +6,7 @@
   "executors": {
     "codex": {
       "type": "codex",
-      "cmd": "/home/ubuntu/.hermes/scripts/codex_ds.sh",
+      "cmd": "codex_ds.sh",
       "enabled": true,
       "note": "视频组正文稿/分镜；需 DEEPSEEK_API_KEY，由壳脚本注入",
       "timeout": 3600
@@ -28,7 +28,7 @@
     },
     "review": {
       "type": "codex_review",
-      "cmd": "/home/ubuntu/.hermes/scripts/codex_ds.sh",
+      "cmd": "codex_ds.sh",
       "enabled": true,
       "timeout": 2400,
       "note": "审核组：另起一次 Codex，只判合规/验收，不改稿"

@@ -7,7 +7,17 @@
 - 付费/对外发布必须人工放行（HumanGate），不自动执行；
 - 执行器给不出 OUTPUT 路径或产出物不存在，一律算失败，不假装成功。
 """
-import json, os, pathlib, re, subprocess, time
+import json, os, pathlib, re, shutil, subprocess, time
+
+
+def resolve_executor(raw):
+    """执行器路径优先取环境变量，其次 PATH，最后回落到配置原值。"""
+    env = os.environ.get("CODEX_DS_SCRIPT")
+    if env:
+        return env
+    if raw and os.path.exists(raw):
+        return raw
+    return shutil.which(raw or "") or raw or "codex_ds.sh"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
@@ -70,7 +80,7 @@ def _codex_like(brief, tid, sid, extra_prefix=""):
     d = workdir(tid, sid)
     prompt = (extra_prefix + "\n\n" + brief).strip()
     (d / "brief.md").write_text(prompt, encoding="utf-8")
-    cmd = [ex["cmd"], "exec", "--skip-git-repo-check", "--sandbox", "danger-full-access", prompt]
+    cmd = [resolve_executor(ex.get("cmd")), "exec", "--skip-git-repo-check", "--sandbox", "danger-full-access", prompt]
     try:
         r = _run_cmd(cmd, d, ex.get("timeout", 3600))
     except subprocess.TimeoutExpired:
