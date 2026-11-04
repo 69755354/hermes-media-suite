@@ -3693,6 +3693,8 @@ class PlaywrightDriver:
         raise GateRed(reason)
 
     def _apply_hold(self, reason, step, extra, *, kind=None):
+        if getattr(self, "_pre_submit", False):
+            return
         if (getattr(self, "_hold_store", None) is None
                 or getattr(getattr(self, "channel", None), "channel_id", None) is None):
             return
@@ -9790,6 +9792,8 @@ def run_publish(plan, driver, ledger: Stage2Ledger, *, mode=MODE_FILL,
                 approval_record=None, approval_preview=None,
                 approval_refresh=None, final_check=None,
                 republish_confirmed=False) -> dict:
+    driver._pre_submit = False
+    driver._pre_submit_failed = False
     simulated = bool(getattr(driver, "simulated", False))
     if simulated and not allow_simulated:
         raise GateRed("\u62d2\u7edd\u6a21\u62df\u9a71\u52a8\uff1b\u6d4b\u8bd5\u987b\u663e\u5f0f allow_simulated=True")
@@ -9909,27 +9913,55 @@ def run_publish(plan, driver, ledger: Stage2Ledger, *, mode=MODE_FILL,
             raise IdempotencyConsumed(
                 "idempotency: already CONSUMED; refusing to republish")
         raise GateRed(f"idempotency: already {state}; refusing to republish")
-    # RESERVED is never automatically recycled on errors. Operator can recycle
-    # a v2 reservation only; SUBMIT_INTENT/UNKNOWN require read-only reconciliation.
+    # A pre-submit failure (Xingtu preflight, or any fill-stage exception before
+    # the publish click) recycles its v2 RESERVED placeholder.  SUBMIT_INTENT /
+    # UNKNOWN are never auto-recycled and require read-only reconciliation.
+    driver._pre_submit = True
+    driver._pre_submit_failed = False
     try:
         driver.fill(plan)
     except xingtu_tasks.XingtuError as exc:
+        driver._pre_submit_failed = True
         # Every Xingtu stop is a pre-submit, pending-confirmation stop: the
         # task could not be listed, was not attached to the upload page, was
         # already submitted, or the duplicate check was unavailable.  None of
         # these is an uncertain publish attempt, so recycle the reservation and
         # leave the channel unfrozen.  The caller surfaces the specific reason.
+        xingtu_recycled = False
         try:
-            ledger.recycle_zombie(
+            xingtu_recycled = ledger.recycle_zombie(
                 key, reason="xingtu preflight: " + type(exc).__name__)
         except Exception:
-            pass
+            xingtu_recycled = False
+        if not xingtu_recycled:
+            driver._pre_submit_failed = False
+            driver._pre_submit = False
+            freeze_execution_failure(exc, step="xingtu_pre_submit_recycle_failed")
         raise
     except BaseException as exc:
         if getattr(driver, "_click_failed", False):
             ledger.mark_unknown(key, "click failed twice during fill")
-        freeze_execution_failure(exc, step="fill_unknown")
+            freeze_execution_failure(exc, step="fill_unknown")
+        else:
+            # Fill stopped before the publish button was pressed, so nothing was
+            # submitted.  Recycle the v2 reservation instead of leaving it
+            # RESERVED (which used to force manual ledger surgery before the
+            # same material+task could be retried) and leave the channel
+            # unfrozen: a pre-submit failure is not an uncertain publish.
+            driver._pre_submit_failed = True
+            recycled = False
+            try:
+                recycled = ledger.recycle_zombie(
+                    key, reason="fill pre-submit: " + type(exc).__name__)
+            except Exception:
+                recycled = False
+            if not recycled:
+                driver._pre_submit_failed = False
+                driver._pre_submit = False
+                freeze_execution_failure(exc, step="fill_pre_submit_recycle_failed")
         raise
+    finally:
+        driver._pre_submit = False
     result["filled"] = True
     result["topic_mode"] = getattr(driver, "topic_mode", None)
     result["topic_modes"] = list(getattr(driver, "topic_modes", []) or [])

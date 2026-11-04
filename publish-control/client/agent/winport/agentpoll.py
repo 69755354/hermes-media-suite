@@ -30,6 +30,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -48,6 +49,8 @@ from .customer_paths import (
 )
 from .secure_io import assert_no_reparse_chain, is_within
 from .subprocess_text import hidden_window_options
+from .version import VERSION
+from .xingtu_tasks import CLIENT_CAPABILITIES
 
 DEFAULT_CONTROL_URL = "http://127.0.0.1:8899"
 DEFAULT_POLL_INTERVAL = 20.0
@@ -69,6 +72,34 @@ COMMAND_SUBCOMMANDS = {
 }
 
 LOG = logging.getLogger("winport.agentpoll")
+
+_SENSITIVE_FIELD_RE = re.compile(
+    r"(?i)((?:confirm_token|receipt|approval_id|signature|private[_ -]?key)"
+    r"[\"']?\s*[:=]\s*)(\"[^\"]*\"|\{[^{}]*\}|[^\s,}]+)")
+_SENSITIVE_KEYS = frozenset((
+    "confirm_token", "receipt", "approval_id", "signature",
+    "private_key", "private key", "private-key",
+))
+
+
+def _redact_sensitive(value, *, key=""):
+    """Strip credentials/tokens from every control-plane-facing field."""
+    key_low = str(key or "").strip().lower().replace(" ", "_")
+    if key_low in _SENSITIVE_KEYS:
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(k): _redact_sensitive(v, key=k) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(_redact_sensitive(parsed), ensure_ascii=False)
+        return _SENSITIVE_FIELD_RE.sub(r'\1"[redacted]"', value)
+    return value
 
 
 class AgentPollError(RuntimeError):
@@ -183,10 +214,24 @@ class AgentConfig:
         timeout=None,
         system_root=None,
         single_root=False,
+        device_id="",
+        binding_epoch=None,
         **kwargs,
     ):
         self.customer_id = normalize_customer_id(customer_id)
         self.token = str(token or "")
+        self.device_id = str(device_id or "").strip()
+        if self.device_id and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", self.device_id):
+            raise ValueError("device_id is not a safe identifier")
+        if binding_epoch in (None, ""):
+            self.binding_epoch = None
+        else:
+            try:
+                self.binding_epoch = int(binding_epoch)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("binding_epoch must be an integer") from exc
+            if self.binding_epoch < 0:
+                raise ValueError("binding_epoch must be >= 0")
         self.control_url = validate_control_url(
             control_url or DEFAULT_CONTROL_URL)
         self.base_data_root = Path(data_root).expanduser() if data_root else default_data_root()
@@ -233,10 +278,22 @@ class AgentConfig:
             or DEFAULT_CUSTOMER_ID
         )
         token = (
-            env.get("CUSTOMER_TOKEN")
+            env.get("DEVICE_TOKEN")
+            or env.get("CUSTOMER_TOKEN")
             or env.get("AGENT_TOKEN")
             or env.get("WINPORT_CUSTOMER_TOKEN")
             or ""
+        )
+        device_id = (
+            env.get("DEVICE_ID")
+            or env.get("WINPORT_DEVICE_ID")
+            or env.get("AGENT_DEVICE_ID")
+            or ""
+        )
+        binding_epoch = (
+            env.get("DEVICE_BINDING_EPOCH")
+            or env.get("BINDING_EPOCH")
+            or None
         )
         data_root = env.get("WINPORT_DATA") or env.get("WORKER_DATA_ROOT")
         configured_url = env.get("CONTROL_URL")
@@ -263,6 +320,8 @@ class AgentConfig:
             system_root=env.get("WINPORT_SYSTEM"),
             single_root=_env_bool(env.get("WINPORT_CUSTOMER_ROOT")
                                   or env.get("AGENT_SINGLE_ROOT")),
+            device_id=device_id,
+            binding_epoch=binding_epoch,
         )
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -280,6 +339,8 @@ class AgentConfig:
             "cli_python": self.cli_python,
             "cli_root": self.cli_root,
             "has_token": bool(self.token),
+            "device_id": self.device_id or None,
+            "binding_epoch": self.binding_epoch,
             "status_file": str(self.status_path),
         }
 
@@ -329,6 +390,16 @@ def _http_json(config, method, path, payload=None, timeout=None):
         raise ControlPlaneError(str(exc)) from exc
 
 
+def _identity(config) -> dict:
+    """Device identity fields sent with every agent-side request."""
+    if not config.device_id:
+        return {}
+    if config.binding_epoch is None:
+        raise AgentPollError("binding_epoch is required when device_id is set")
+    return {"device_id": config.device_id,
+            "binding_epoch": int(config.binding_epoch)}
+
+
 # ---------------------------------------------------------------------------
 # Poll / result protocol
 # ---------------------------------------------------------------------------
@@ -343,7 +414,7 @@ def poll_once(config, channel=None, include_unaddressed=False):
 
     Returns the command dict, or ``None`` when the queue is empty.
     """
-    request = {"customer_id": config.customer_id}
+    request = {"customer_id": config.customer_id, **_identity(config)}
     if channel:
         request["channel"] = str(channel)
         if include_unaddressed:
@@ -375,11 +446,12 @@ def post_result(config, command, result):
     status = "done" if result.get("ok") else "failed"
     body = {
         "customer_id": config.customer_id,
+        **_identity(config),
         "command_id": command_id,
         "id": command_id,
         "kind": normalize_kind(command.get("kind")),
         "status": status,
-        "result": result,
+        "result": _redact_sensitive(result),
     }
     try:
         code, response = _http_json(config, "POST", "/api/command", body, timeout=20)
@@ -559,6 +631,10 @@ def _worker_env(config) -> dict:
     env["WINPORT_DATA"] = str(layout.root)
     env["WINPORT_SYSTEM"] = str(layout.system)
     env["CUSTOMER_ID"] = config.customer_id
+    if config.device_id:
+        env["DEVICE_ID"] = config.device_id
+    if config.binding_epoch is not None:
+        env["DEVICE_BINDING_EPOCH"] = str(config.binding_epoch)
     if config.token:
         env["CUSTOMER_TOKEN"] = config.token
     if config.program_dir:
@@ -658,8 +734,12 @@ def execute_command(config, command, runner=None):
             "kind": kind,
             "command_id": command.get("command_id") or command.get("id"),
             "argv": argv,
-            "stdout": (exc.stdout or "") if isinstance(exc.stdout, str) else "",
-            "stderr": (exc.stderr or "") if isinstance(exc.stderr, str) else "",
+            "stdout": _redact_sensitive((exc.stdout or "")
+                                        if isinstance(exc.stdout, str) else ""),
+            "stderr": _redact_sensitive((exc.stderr or "")
+                                        if isinstance(exc.stderr, str) else ""),
+            "client_version": VERSION,
+            "capabilities": list(CLIENT_CAPABILITIES),
         }
     except Exception as exc:  # noqa: BLE001 - reported, never crashes the loop
         return {
@@ -669,6 +749,8 @@ def execute_command(config, command, runner=None):
             "kind": kind,
             "command_id": command.get("command_id") or command.get("id"),
             "argv": argv,
+            "client_version": VERSION,
+            "capabilities": list(CLIENT_CAPABILITIES),
         }
 
     stdout = proc.stdout or ""
@@ -678,7 +760,7 @@ def execute_command(config, command, runner=None):
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", "replace")
     exit_code = proc.returncode
-    parsed = _parse_worker_output(stdout)
+    parsed = _redact_sensitive(_parse_worker_output(stdout))
     ok = (
         exit_code == 0
         and parsed.get("ok", True) is not False
@@ -690,10 +772,12 @@ def execute_command(config, command, runner=None):
         "kind": kind,
         "command_id": command.get("command_id") or command.get("id"),
         "exit_code": exit_code,
-        "stdout": stdout[-20000:],
-        "stderr": stderr[-20000:],
+        "stdout": _redact_sensitive(stdout[-20000:]),
+        "stderr": _redact_sensitive(stderr[-20000:]),
         "result": parsed,
         "argv": argv,
+        "client_version": VERSION,
+        "capabilities": list(CLIENT_CAPABILITIES),
     }
 
 
@@ -808,6 +892,8 @@ def write_status(config, **fields):
         "version": STATE_VERSION,
         "customer_id": config.customer_id,
         "control_url": config.control_url,
+        "client_version": VERSION,
+        "capabilities": list(CLIENT_CAPABILITIES),
         "updated": time.time(),
     }
     data.update(fields)
@@ -876,6 +962,8 @@ def process_command(config, command, runner=None):
         }
     result.setdefault("command_id", command_id)
     result.setdefault("kind", kind)
+    result.setdefault("client_version", VERSION)
+    result.setdefault("capabilities", list(CLIENT_CAPABILITIES))
     state.mark_result(command_id, result)
     return result
 
@@ -901,6 +989,8 @@ class AgentPoller:
             "state": "starting",
             "consecutive_failures": 0,
             "last_error": None,
+            "client_version": VERSION,
+            "capabilities": list(CLIENT_CAPABILITIES),
         }
 
     def stop(self):
@@ -919,7 +1009,11 @@ class AgentPoller:
         data.update({
             "version": STATE_VERSION,
             "customer_id": self.config.customer_id,
+            "device_id": self.config.device_id or None,
+            "binding_epoch": self.config.binding_epoch,
             "control_url": self.config.control_url,
+            "client_version": VERSION,
+            "capabilities": list(CLIENT_CAPABILITIES),
             "pid": os.getpid(),
             "thread": threading.current_thread().name,
         })
@@ -1231,6 +1325,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="WinPort multitenant control-plane poller")
     parser.add_argument("--customer-id", default=None)
     parser.add_argument("--token", default=None)
+    parser.add_argument("--device-id", default=None)
+    parser.add_argument("--binding-epoch", type=int, default=None)
     parser.add_argument("--control-url", default=None)
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--interval", type=float, default=None)
@@ -1244,6 +1340,10 @@ def main(argv=None):
         overrides["customer_id"] = args.customer_id
     if args.token:
         overrides["token"] = args.token
+    if args.device_id:
+        overrides["device_id"] = args.device_id
+    if args.binding_epoch is not None:
+        overrides["binding_epoch"] = args.binding_epoch
     if args.control_url:
         overrides["control_url"] = args.control_url
     if args.data_root:
@@ -1256,6 +1356,8 @@ def main(argv=None):
         parser.error(str(exc))
     if not config.token:
         parser.error("CUSTOMER_TOKEN (or --token) is required")
+    if bool(config.device_id) != (config.binding_epoch is not None):
+        parser.error("DEVICE_ID and DEVICE_BINDING_EPOCH must be set together")
     if args.once:
         result = AgentPoller(config).run_once()
         print(json.dumps(result or {"command": None}, ensure_ascii=False, indent=2))

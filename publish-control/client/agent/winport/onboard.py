@@ -190,6 +190,17 @@ def import_license(layout, src, *, machine_id=None, fingerprint_info=None,
                   customer_id=obj.get("customer_id"))
     if status in _INSTALLABLE:
         if install:
+            try:
+                from .license import mark_trial_license_seen
+                tombstone_fp = dict(fp)
+                tombstone_fp["machine_id"] = effective_machine_id
+                mark_trial_license_seen(layout, fingerprint_info=tombstone_fp)
+            except OSError as exc:
+                result.update(status="TOMBSTONE_FAILED",
+                              reason="授权校验通过，但防回放墓碑写入失败：%s；"
+                                     "本次未安装授权。" % exc,
+                              installed=False)
+                return result
             _install_atomic(src, Path(layout.license_file))
             result["installed"] = True
             result["reason"] = {

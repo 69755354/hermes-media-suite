@@ -69,28 +69,6 @@ def exchange(token, machine_id):
     return obj['license']
 
 
-def write_control_binding(layout, document):
-    """Persist the control-plane binding shipped inside the licence."""
-    if not isinstance(document, dict):
-        return None
-    url = str(document.get('control_url') or '').strip().rstrip('/')
-    customer_id = str(document.get('control_customer_id') or '').strip()
-    token = str(document.get('control_customer_token') or '').strip()
-    if not (url.startswith('https://') and customer_id and token):
-        return None
-    path = Path(layout.data) / 'control.json'
-    payload = {'control_url': url, 'customer_id': customer_id, 'customer_token': token}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix='.control-', suffix='.json', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as out:
-            json.dump(payload, out, ensure_ascii=False); out.flush(); os.fsync(out.fileno())
-        os.replace(tmp, path)
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-    return path
-
-
 def activate_with_code(layout, code):
     """Redeem a short enrolment code typed by the customer.
 
@@ -105,16 +83,21 @@ def activate_with_code(layout, code):
         with _LOCK:
             state = unified_license_state(layout)
             if state['publish_allowed'] and state.get('source') != 'trial':
+                if state.get('tombstone_error'):
+                    return {'ok': False,
+                            'reason': '已有授权，但防回放墓碑仍无法写入；'
+                                      '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需再次激活'}
         document = exchange(normalized, fingerprint()['machine_id'])
         with _LOCK:
             state = unified_license_state(layout)
             if state['publish_allowed'] and state.get('source') != 'trial':
+                if state.get('tombstone_error'):
+                    return {'ok': False,
+                            'reason': '已有授权，但防回放墓碑仍无法写入；'
+                                      '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需再次激活'}
-            result = install_document(layout, document)
-            if result.get('ok'):
-                write_control_binding(layout, document)
-            return result
+            return install_document(layout, document)
     except HTTPError as exc:
         reason = f'激活服务返回 HTTP {exc.code}；请核对激活码或联系服务商。'
     except (TimeoutError, socket.timeout):
@@ -159,6 +142,14 @@ def install_document(layout, document, *, overwrite=False):
         state = unified_license_state(layout, license_path=name)
         if not state['publish_allowed']:
             return {'ok': False, 'reason': state['text']}
+        try:
+            from .license import mark_trial_license_seen
+            mark_trial_license_seen(layout)
+        except OSError as exc:
+            return {'ok': False,
+                    'reason': '授权校验通过，但防回放墓碑写入失败：%s；'
+                              '本次未安装授权，请重试或联系服务商。' % exc,
+                    'tombstone_error': True}
         os.replace(name, dst)
         return {'ok': True, 'reason': '授权已自动生效'}
     finally:
@@ -170,6 +161,10 @@ def activate(layout):
         with _LOCK:
             state = unified_license_state(layout)
             if state['publish_allowed'] and state.get('source') != 'trial':
+                if state.get('tombstone_error'):
+                    return {'ok': False,
+                            'reason': '已有授权，但防回放墓碑仍无法写入；'
+                                      '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需联网'}
             bundled = install_root() / 'license' / 'license.json'
             if bundled.is_file():
@@ -180,11 +175,6 @@ def activate(layout):
         if not config_path.is_file():
             return {'ok': False, 'reason': '安装包缺少自动激活信息，请联系服务商；无需自行导入授权。'}
         config = json.loads(config_path.read_text(encoding='utf-8-sig'))
-        if not str(config.get('enrollment_token') or '').strip():
-            # Generic package: no customer identity is baked in.  The panel
-            # asks for the 8-character code on first launch.
-            return {'ok': False, 'pending_code': True,
-                    'reason': '\u5b89\u88c5\u5b8c\u6210\uff1a\u8bf7\u5728\u63a7\u5236\u9762\u677f\u8f93\u5165 8 \u4f4d\u6fc0\u6d3b\u7801\u5b8c\u6210\u7ed1\u5b9a\u3002'}
         endpoint = config.get('endpoint')
         if endpoint is not None and endpoint != CODE_ENDPOINT:
             logging.getLogger(__name__).warning(
@@ -194,11 +184,12 @@ def activate(layout):
         with _LOCK:
             state = unified_license_state(layout)
             if state['publish_allowed'] and state.get('source') != 'trial':
+                if state.get('tombstone_error'):
+                    return {'ok': False,
+                            'reason': '已有授权，但防回放墓碑仍无法写入；'
+                                      '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需联网'}
-            result = install_document(layout, document)
-            if result.get('ok'):
-                write_control_binding(layout, document)
-            return result
+            return install_document(layout, document)
     except HTTPError as exc:
         reason = f'授权服务返回 HTTP {exc.code}；请联系服务商核对授权状态。'
     except (TimeoutError, socket.timeout):
@@ -227,7 +218,7 @@ def main():
     args = parser.parse_args()
     result = activate(Layout(data=args.data).ensure())
     print(result['reason'], flush=True)
-    return 0 if (result.get('ok') or result.get('pending_code')) else 5
+    return 0 if result['ok'] else 5
 
 
 if __name__ == '__main__':

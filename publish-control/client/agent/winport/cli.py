@@ -13,6 +13,9 @@ from .errors import EXIT_GATE_RED, EXIT_SKIP
 from .jsonio import read_json, read_jsonl, write_json
 from .paths import Layout
 from .version import VERSION
+from . import xingtu_tasks
+
+CLIENT_CAPABILITIES = tuple(xingtu_tasks.CLIENT_CAPABILITIES)
 
 
 def _layout(args) -> Layout:
@@ -267,6 +270,54 @@ AUTO_SUBMIT_DEFAULT_NOTE = (
     "\u53ea\u6709\u663e\u5f0f\u52a0 --allow-submit \u4e14\u98de\u4e66/\u5ba1\u6279\u95e8\u7981\u901a\u8fc7\u540e\uff0c\u624d\u4f1a\u771f\u7684\u70b9\u51fb\u53d1\u5e03\u3002")
 
 
+def _xingtu_task_or_empty(plan, mode=None):
+    try:
+        return xingtu_tasks.task_from_plan(plan, mode=mode) or {}
+    except xingtu_tasks.XingtuError:
+        return {}
+
+
+def _xingtu_failure_result(plan, mode, exc):
+    """Build one backward-compatible, code-driven Xingtu failure result."""
+    envelope = xingtu_tasks.error_envelope(
+        exc, client_version=VERSION, capabilities=CLIENT_CAPABILITIES,
+        stage="preflight" if getattr(exc, "stage", "") == "preflight" else "confirm")
+    task = _xingtu_task_or_empty(plan, mode)
+    result = {
+        "mode": mode,
+        "plan_id": (plan or {}).get("plan_id") if isinstance(plan, dict) else None,
+        "account_id": (plan or {}).get("account_id") if isinstance(plan, dict) else None,
+        "filled": False,
+        "published": False,
+        "platform_work_id": None,
+        "work_id": None,
+        "evidence": [],
+        "publish_mode": "xingtu",
+        "xingtu_attached": False,
+        "xingtu_order_id": task.get("order_id", ""),
+        "xingtu_task_name": task.get("task_name", ""),
+        "client_version": VERSION,
+        "capabilities": list(CLIENT_CAPABILITIES),
+    }
+    result.update(envelope)
+    code = envelope["code"]
+    result["stopped_at"] = {
+        "XINGTU_TASK_NOT_FOUND": "xingtu_task_not_found",
+        "XINGTU_TASK_AMBIGUOUS": "xingtu_task_ambiguous",
+        "XINGTU_TASK_NOT_ATTACHED": "xingtu_task_not_attached",
+        "XINGTU_TASK_CHANGED": "xingtu_task_changed",
+        "XINGTU_TASK_UNAVAILABLE": "xingtu_task_unavailable",
+        "XINGTU_DUPLICATE_LOCAL": "xingtu_duplicate_local",
+        "XINGTU_DUPLICATE_POSSIBLE_LOCAL": "xingtu_duplicate_possible_local",
+        "XINGTU_DEDUP_LEDGER_ERROR": "xingtu_dedup_ledger_error",
+        "XINGTU_PLAN_SCHEMA_INVALID": "xingtu_plan_schema_invalid",
+        "XINGTU_ALREADY_SUBMITTED": "xingtu_duplicate",
+        "XINGTU_DUPLICATE_CHECK_UNKNOWN": "xingtu_duplicate_check_unknown",
+        "XINGTU_CLIENT_SIGNED_OUT": "xingtu_client_signed_out",
+    }.get(code, "xingtu_failed")
+    return result
+
+
 def _publish_target(layout, plan):
     from .dryrun import resolve_targets
     return resolve_targets(plan, envs=_envs(layout), channels=_channels(layout))
@@ -334,61 +385,11 @@ def _execute_publish(layout, plan, args, ledger, *, env, channel, **kwargs):
             return result
         result["publish_mode"] = "normal"
         return result
-    except xingtu_tasks.XingtuTaskNotAttached as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_task_not_attached",
-                "xingtu_attached": False,
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_TASK_NOT_ATTACHED",
-                              "message": str(exc)}]}
-    except xingtu_tasks.XingtuAlreadySubmitted as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_duplicate",
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_ALREADY_SUBMITTED",
-                              "message": str(exc)}]}
-    except xingtu_tasks.XingtuDuplicateLocal as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_duplicate_local",
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_DUPLICATE_LOCAL",
-                              "message": str(exc)}]}
-    except xingtu_tasks.XingtuDedupLedgerError as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_dedup_ledger_error",
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_DEDUP_LEDGER_ERROR",
-                              "message": str(exc)}]}
-    except xingtu_tasks.XingtuDuplicateCheckUnavailable as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_duplicate_check_unknown",
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_DUPLICATE_CHECK_UNKNOWN",
-                              "message": str(exc)}]}
-    except xingtu_tasks.XingtuTaskUnavailable as exc:
-        return {"mode": kwargs.get("mode") or "fill", "filled": False,
-                "published": False, "platform_work_id": None, "work_id": None,
-                "evidence": [], "publish_mode": "xingtu",
-                "stopped_at": "xingtu_task_unavailable",
-                "xingtu_order_id": xingtu_tasks.task_from_plan(plan, mode=mode).get("order_id"),
-                "xingtu_error": str(exc),
-                "problems": [{"code": "XINGTU_TASK_UNAVAILABLE",
-                              "message": str(exc)}]}
+    except (xingtu_tasks.XingtuDuplicateLocal,
+            xingtu_tasks.XingtuDedupLedgerError) as exc:
+        return _xingtu_failure_result(plan, kwargs.get("mode") or "fill", exc)
+    except xingtu_tasks.XingtuError as exc:
+        return _xingtu_failure_result(plan, kwargs.get("mode") or "fill", exc)
     except IdempotencyConsumed:
         # A CONSUMED key is a known-success refusal, not an uncertain publish.
         # Freezing here would make the customer-confirmed republish exit
@@ -400,6 +401,13 @@ def _execute_publish(layout, plan, args, ledger, *, env, channel, **kwargs):
         # run_publish and the channel is not frozen.
         raise
     except BaseException as exc:
+        # Deterministic idempotency refusals happen before any page
+        # action; freezing the channel for them blocks unrelated
+        # materials until a manual unfreeze.
+        if b"refusing to republish" in str(exc).lower().encode():
+            raise
+        if driver is not None and getattr(driver, "_pre_submit_failed", False):
+            raise
         try:
             if not hold_store.get(channel.channel_id):
                 hold_store.persist_failure(
@@ -469,6 +477,26 @@ def cmd_publish(args):
         raise WinPortError(f"plan not found or unreadable: {args.plan}",
                            exit_code=EXIT_GATE_RED)
 
+    try:
+        ledger_path = xingtu_tasks.used_tasks_path(layout)
+    except Exception:
+        ledger_path = None
+    validation = xingtu_tasks.validate_plan_contract(
+        plan, mode=args.mode, ledger_path=ledger_path)
+    if not validation["ok"]:
+        problem = validation["problems"][0]
+        exc = xingtu_tasks.XingtuPlanSchemaInvalid(
+            problem["message"], code=problem["code"],
+            details={"problems": validation["problems"]},
+            failure_scope=problem.get("failure_scope", "batch"),
+            action=problem.get("action", "regenerate_plan"),
+            stage="preflight")
+        failure = _xingtu_failure_result(plan, args.mode, exc)
+        failure["problems"] = validation["problems"]
+        failure["blocking_problem"] = problem
+        print(json.dumps(failure, ensure_ascii=False, indent=2))
+        return EXIT_GATE_RED
+
     from .publish_exec import MODE_APPROVED, MODE_FILL
     gate = _licence_gate(layout, license_path=getattr(args, "license", None),
                          plan=plan)
@@ -484,6 +512,8 @@ def cmd_publish(args):
         "gate": gate,
         "note": AUTO_SUBMIT_DEFAULT_NOTE,
         "evidence": [],
+        "client_version": VERSION,
+        "capabilities": list(CLIENT_CAPABILITIES),
     }
     if gate.get("publish_allowed") is not True:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -714,11 +744,13 @@ def _licence_gate(layout, *, license_path=None, plan=None,
     """
     from .fingerprint import fingerprint
     from .license import (clock_guard, load_vendor_public_key, publish_gate,
-                          require_vendor_public_key)
+                          require_vendor_public_key, trial_state,
+                          STATUS_SEAT_DENIED)
     blocked = {"publish_allowed": False, "collect_allowed": True, "status": "",
-               "license_status": "", "days_left": None, "level": None,
+               "license_status": "", "days_left": None, "level": "bad",
                "notices": [], "seat": None,
-               "clock_rollback": False, "reasons": []}
+               "clock_rollback": False, "reasons": [],
+               "tombstone_error": None}
 
     # ---- startup-chain integrity (item 5): fail -> no NEW publish -----------
     try:
@@ -735,15 +767,27 @@ def _licence_gate(layout, *, license_path=None, plan=None,
         blocked["reasons"].append(f"\u542f\u52a8\u94fe\u5b8c\u6574\u6027\u6821\u9a8c\u65e0\u6cd5\u6267\u884c\uff0c\u62d2\u7edd\u53d1\u5e03\uff1a{exc}")
         return blocked
 
-    licence_path = license_path or layout.license_file
-    if not Path(licence_path).exists():
-        from .license import trial_state
-        trial = trial_state(layout)
-        if trial:
-            return dict(blocked, **{k: v for k, v in trial.items() if k != "reasons"})
-        blocked["status"] = "NOT_ACTIVATED"
-        blocked["reasons"].append("\u672a\u627e\u5230\u6388\u6743\u6587\u4ef6\uff08license.json\uff09\u4e14\u8bd5\u7528\u671f\u5df2\u7ed3\u675f\uff1a\u62d2\u7edd\u53d1\u5e03\u3002")
-        blocked["notices"].append("\u8bf7\u53cc\u51fb\u684c\u9762\u300c\u5bfc\u5165\u6388\u6743\u300d\u5bfc\u5165\u670d\u52a1\u5546\u7b7e\u53d1\u7684 license.json\u3002")
+    # The fingerprint, account seat and clock are checked BEFORE the no-licence
+    # trial branch.  A deleted/corrupt trial record is never recreated here.
+    fp = fingerprint()
+    if allow_test_injection and machine_id_override:
+        machine_id = machine_id_override
+        fp_for_check = fingerprint_override   # None on the static host
+    else:
+        machine_id = fp["machine_id"]
+        fp_for_check = fp
+    if fp_for_check is not None and fp_for_check.get("weak"):
+        blocked["status"] = "WEAK_FINGERPRINT"
+        blocked["license_status"] = "WEAK_FINGERPRINT"
+        blocked["reasons"].append(
+            "\u672c\u673a\u673a\u5668\u6307\u7eb9\u592a\u5f31\uff0c\u62d2\u7edd\u7ed1\u5b9a\uff1a\u65b0\u589e\u53d1\u5e03\u5df2\u6682\u505c\u3002")
+        return blocked
+
+    account_id = (plan or {}).get("account_id")
+    if not account_id:
+        blocked["status"] = "NO_ACCOUNT"
+        blocked["license_status"] = "NO_ACCOUNT"
+        blocked["reasons"].append("\u53d1\u5e03\u8ba1\u5212\u7f3a\u5c11 account_id\uff0c\u65e0\u6cd5\u505a\u5e2d\u4f4d\u6821\u9a8c\uff0c\u62d2\u7edd\u53d1\u5e03\u3002")
         return blocked
 
     try:
@@ -754,6 +798,36 @@ def _licence_gate(layout, *, license_path=None, plan=None,
     except Exception as exc:
         blocked["status"] = "NO_VENDOR_KEY"
         blocked["reasons"].append(f"\u4f9b\u5e94\u5546\u516c\u94a5\u7f3a\u5931\u6216\u635f\u574f\uff0c\u62d2\u7edd\u53d1\u5e03\uff1a{exc}")
+        return blocked
+
+    # fail-CLOSED: an unreadable / unwritable clock state counts as a rollback
+    clock = clock_guard(layout.run / "license-clock.json")
+    rollback = bool(clock.get("rollback")) or not clock.get("state_ok", True)
+
+    licence_path = license_path or layout.license_file
+    if not Path(licence_path).exists():
+        trial = trial_state(layout, account_id=account_id,
+                            fingerprint_info=fp_for_check, clock=clock)
+        if trial is not None:
+            result = dict(blocked)
+            result.update({k: v for k, v in trial.items()
+                           if k not in ("reasons", "notices")})
+            result["reasons"] = list(trial.get("reasons") or [])
+            result["notices"] = list(trial.get("notices") or [])
+            return result
+        if rollback:
+            blocked["status"] = clock.get("status") or "CLOCK_ROLLBACK"
+            blocked["license_status"] = blocked["status"]
+            blocked["clock_rollback"] = True
+            blocked["reasons"].append(
+                "\u65f6\u949f\u6821\u9a8c\u672a\u901a\u8fc7\uff08%s\uff09\uff1a\u4e3a\u9632\u7ed5\u8fc7\u6388\u6743\u5230\u671f\uff0c"
+                "\u65b0\u589e\u53d1\u5e03\u5df2\u6682\u505c\uff1b\u8bf7\u6821\u51c6\u7cfb\u7edf\u65f6\u95f4\u540e\u91cd\u8bd5\u3002"
+                % blocked["status"])
+            return blocked
+        blocked["status"] = "NOT_ACTIVATED"
+        blocked["license_status"] = "NOT_ACTIVATED"
+        blocked["reasons"].append("\u672a\u627e\u5230\u6388\u6743\u6587\u4ef6\uff08license.json\uff09\uff0c\u4e14\u65e0\u53ef\u7ee7\u7eed\u7684\u8bd5\u7528\u8bb0\u5f55\uff1a\u62d2\u7edd\u53d1\u5e03\u3002")
+        blocked["notices"].append("\u8bf7\u53cc\u51fb\u684c\u9762\u300c\u5bfc\u5165\u6388\u6743\u300d\u5bfc\u5165\u670d\u52a1\u5546\u7b7e\u53d1\u7684 license.json\u3002")
         return blocked
 
     # 1.2.7 (GPT review 1.2.4 item 1 / item 9): an EXISTING but empty / corrupt
@@ -774,27 +848,24 @@ def _licence_gate(layout, *, license_path=None, plan=None,
         blocked["reasons"].append("\u6388\u6743\u6587\u4ef6\u4e3a\u7a7a\u6216\u4e0d\u662f\u6709\u6548 JSON\uff0c\u62d2\u7edd\u53d1\u5e03\u3002")
         return blocked
 
-    fp = fingerprint()
-    if allow_test_injection and machine_id_override:
-        machine_id = machine_id_override
-        fp_for_check = fingerprint_override   # None on the static host
-    else:
-        machine_id = fp["machine_id"]
-        fp_for_check = fp
-
-    account_id = (plan or {}).get("account_id")
-    if not account_id:
-        blocked["status"] = "NO_ACCOUNT"
-        blocked["reasons"].append("\u53d1\u5e03\u8ba1\u5212\u7f3a\u5c11 account_id\uff0c\u65e0\u6cd5\u505a\u5e2d\u4f4d\u6821\u9a8c\uff0c\u62d2\u7edd\u53d1\u5e03\u3002")
-        return blocked
-
-    # fail-CLOSED: an unreadable / unwritable clock state counts as a rollback
-    clock = clock_guard(layout.run / "license-clock.json")
-    rollback = bool(clock.get("rollback")) or not clock.get("state_ok", True)
     gate = publish_gate(obj, key, machine_id, account_id=account_id,
                         fingerprint_info=fp_for_check,
                         clock_rollback=rollback)
     gate["clock"] = clock
+    if gate.get("license_status") in ("OK", "GRACE", "EXPIRED"):
+        try:
+            from .license import mark_trial_license_seen
+            mark_trial_license_seen(layout, fingerprint_info=fp_for_check)
+        except Exception as exc:
+            # A formal licence whose anti-replay tombstone cannot be written
+            # must not publish: deleting license.json afterwards would grant a
+            # fresh trial.  Returning a recorded error only was a fail-open.
+            gate["tombstone_error"] = str(exc)
+            gate["publish_allowed"] = False
+            gate["status"] = "TRIAL_TOMBSTONE_FAILED"
+            gate.setdefault("reasons", []).append(
+                "已读取正式授权，但防回放墓碑写入失败：%s；新增发布已暂停，"
+                "请检查磁盘/注册表权限后重试或联系服务商。" % exc)
     # 1.2.10 (GPT_REVIEW_1.2.8 \u5fc5\u4fee 2): ``publish_gate`` only flips
     # ``publish_allowed`` to False on a clock rollback -- it keeps the RAW
     # signature verdict in ``status`` (typically "OK").  A consumer that keyed
@@ -804,8 +875,8 @@ def _licence_gate(layout, *, license_path=None, plan=None,
     # ``licstate.unified_license_state``: keep the raw signature verdict in a
     # separate ``license_status`` and NAME the FINAL status with the blocker, so
     # a refused publish is NEVER reported as "OK".
-    gate["license_status"] = gate.get("status")
-    if rollback and gate["status"] in ("OK", "GRACE"):
+    gate["license_status"] = gate.get("license_status") or gate.get("status")
+    if rollback and gate["status"] in ("OK", "GRACE", STATUS_SEAT_DENIED):
         gate["status"] = clock.get("status") or "CLOCK_ROLLBACK"
         gate["publish_allowed"] = False
     return gate
@@ -819,6 +890,29 @@ def cmd_dry_run(args):
     plan = read_json(Path(args.plan))
     if plan is None:
         raise WinPortError(f"plan not found: {args.plan}")
+    try:
+        ledger_path = xingtu_tasks.used_tasks_path(layout)
+    except Exception:
+        ledger_path = None
+    validation = xingtu_tasks.validate_plan_contract(
+        plan, mode="dry-run", ledger_path=ledger_path)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "json": None,
+            "md": None,
+            "problems": validation["problems"],
+            "warnings": [],
+            "client_version": VERSION,
+            "capabilities": list(CLIENT_CAPABILITIES),
+            "xingtu_preflight": "deferred",
+            "code": validation["problems"][0].get("code"),
+            "message": validation["problems"][0].get("message"),
+            "failure_scope": validation["problems"][0].get("failure_scope"),
+            "action": validation["problems"][0].get("action"),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return EXIT_GATE_RED
     settings = load_settings(layout.settings_file)
     preview = build_preview(plan, envs=_envs(layout), channels=_channels(layout),
                             settings=settings,
@@ -840,7 +934,10 @@ def cmd_dry_run(args):
                               "problems": preview["problems"],
                               "warnings": preview["warnings"],
                               "confirmation": preview["confirmation"],
-                              "idempotency_key": preview.get("idempotency_key")},
+                              "idempotency_key": preview.get("idempotency_key"),
+                              "client_version": VERSION,
+                              "capabilities": list(CLIENT_CAPABILITIES),
+                              "xingtu_preflight": "deferred"},
                              ensure_ascii=False, indent=2))
             return EXIT_GATE_RED
     wrote = write_preview(layout, preview, out=args.out, out_md=args.out_md)
@@ -848,7 +945,10 @@ def cmd_dry_run(args):
                       "problems": preview["problems"],
                       "warnings": preview["warnings"],
                       "confirmation": preview.get("confirmation"),
-                      "idempotency_key": preview.get("idempotency_key")},
+                      "idempotency_key": preview.get("idempotency_key"),
+                      "client_version": VERSION,
+                      "capabilities": list(CLIENT_CAPABILITIES),
+                      "xingtu_preflight": "deferred"},
                      ensure_ascii=False, indent=2))
     return EXIT_OK if preview["ok"] else EXIT_GATE_RED
 
@@ -1099,7 +1199,8 @@ def cmd_state(args):
     alerts = state_machine.env_alerts(
         [{"channel_id": k, "account_state": v.get("state")} for k, v in prev.items()],
         rows, env_labels={e.env_id: e.label for e in envs})
-    print(json.dumps({"counts": view["totals"], "environments": [
+    print(json.dumps({"counts": view["totals"], "client_version": VERSION,
+                      "capabilities": list(CLIENT_CAPABILITIES), "environments": [
         {"env_id": e["env_id"], "label": e["label"],
          "state": e["state"], "state_label": e["state_label"],
          "platforms": [{"channel_id": r["channel_id"],

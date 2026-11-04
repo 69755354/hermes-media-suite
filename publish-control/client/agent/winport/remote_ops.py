@@ -662,14 +662,23 @@ def confirm(config, payload=None, command_id=None, runner=None):
         if isinstance(value, dict):
             parsed = value
             break
-    # approved_publish can lose stdout on Windows; exit zero is success only
-    # when both explicit real-submit switches were supplied.
-    published = bool(parsed.get("published")) or (
-        proc.returncode == 0 and allow_submit and canary_armed
-        and "published" not in parsed)
-    ok = proc.returncode == 0 and published
+    # Never infer a publish from exit code + switches.  A zero exit with lost
+    # stdout, an empty object, or {"ok": false, "error": ...} is unconfirmed,
+    # not success.  Only the worker's explicit boolean proves publication.
+    reported_error = parsed.get("error")
+    parsed_failed = parsed.get("ok") is False or bool(reported_error)
+    published = (proc.returncode == 0 and not parsed_failed
+                 and parsed.get("published") is True)
+    if proc.returncode != 0 or parsed_failed:
+        status = "failed"
+    elif published:
+        status = "done"
+    else:
+        status = "needs_reconcile"
+    ok = status == "done"
     return {
         "ok": ok,
+        "status": status,
         "stage": "confirm",
         "exit_code": proc.returncode,
         "published": published,

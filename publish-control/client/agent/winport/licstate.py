@@ -29,6 +29,7 @@ from pathlib import Path
 STATUS_NOT_ACTIVATED = "NOT_ACTIVATED"
 STATUS_UNREADABLE = "LICENCE_UNREADABLE"
 STATUS_NO_VENDOR_KEY = "NO_VENDOR_KEY"
+STATUS_TOMBSTONE_FAILED = "TRIAL_TOMBSTONE_FAILED"
 
 #: human-readable, Chinese label per status -- the ONE wording the panel,
 #: self-test and daemon all reuse (no more three competing sentences).
@@ -41,9 +42,12 @@ STATUS_ZH = {
     "SCHEMA_INVALID": "授权文件字段不完整或类型错误",
     "WEAK_FINGERPRINT": "本机机器指纹太弱，拒绝绑定",
     "CRYPTO_UNAVAILABLE": "本机缺少可用的密码学后端",
+    "SEAT_DENIED": "当前账号未授权或已停用",
+    "TRIAL": "试用授权",
     STATUS_NOT_ACTIVATED: "自动授权尚未完成",
     STATUS_UNREADABLE: "授权文件损坏或无法解析",
     STATUS_NO_VENDOR_KEY: "供应商公钥缺失或损坏",
+    STATUS_TOMBSTONE_FAILED: "防回放墓碑写入失败",
     "CLOCK_ROLLBACK": "检测到系统时间被回拨",
     "CLOCK_STATE_UNREADABLE": "时钟状态文件无法读取",
     "CLOCK_STATE_INVALID": "时钟状态文件损坏或缺失",
@@ -137,11 +141,14 @@ def unified_license_state(layout, *, now=None, account_id=None,
     fixed trust root is used unless a test injects ``public_key`` /
     ``fingerprint_info`` explicitly (mirrors ``cli._licence_gate``).
     """
-    from .license import (clock_guard, publish_gate, CLOCK_BLOCKING_STATUSES)
+    from .license import (clock_guard, publish_gate, CLOCK_BLOCKING_STATUSES,
+                          STATUS_SEAT_DENIED)
+    from .customer_paths import layout_dir
 
     lp = Path(license_path) if license_path else Path(layout.license_file)
     out = {
         "status": STATUS_NOT_ACTIVATED,
+        "license_status": STATUS_NOT_ACTIVATED,
         "publish_allowed": False,
         "collect_allowed": True,
         "days_left": None,
@@ -157,11 +164,12 @@ def unified_license_state(layout, *, now=None, account_id=None,
         "trust_root": "ok",
         "license_path": str(lp),
         "source": "licstate",
+        "tombstone_error": None,
     }
 
     # ---- clock high-water (always evaluated: a rollback blocks publish) ------
     clock_path = (Path(clock_state_path) if clock_state_path
-                  else Path(getattr(layout, "run", Path(layout.data))) /
+                  else layout_dir(layout, "run") /
                   "license-clock.json")
     try:
         clock = clock_guard(clock_path, now=now)
@@ -176,32 +184,7 @@ def unified_license_state(layout, *, now=None, account_id=None,
         "state_ok", True)
     out["clock_rollback"] = bool(clock.get("rollback"))
 
-    # ---- read the licence file (protected) ----------------------------------
-    read = read_license_file(lp)
-    if read["kind"] == "missing":
-        from .license import trial_state
-        trial = trial_state(layout, now=now)
-        if trial:
-            out.update({k: v for k, v in trial.items() if k != "reasons"})
-            out["text"] = "试用授权进行中，剩余 %s 天" % trial.get("days_left")
-            out["label"] = "试用中"
-            return out
-        out["reasons"].append(
-            "未找到授权文件（license.json）且试用期已结束：拒绝发布。")
-        out["notices"].append("请双击桌面「导入授权」导入服务商签发的 license.json。")
-        out["text"] = "试用期已结束，新增发布暂停"
-        out["level"] = "warn"
-        return out
-    if read["kind"] != "ok":
-        out["status"] = STATUS_UNREADABLE
-        out["reasons"].append(
-            f"授权文件损坏（{read['error']}）：新增发布暂停，抓数与历史数据不受影响。"
-            + REIMPORT_TEXT)
-        out["notices"].append("授权文件损坏：" + REIMPORT_TEXT)
-        out["text"] = "授权文件损坏，无法解析；新增发布暂停。" + REIMPORT_TEXT
-        return out
-
-    # ---- fixed trust root ---------------------------------------------------
+    # ---- fixed trust root (checked before trial is even considered) ---------
     key, key_note = _load_trust_root(layout, public_key=public_key,
                                      public_key_path=public_key_path)
     if key is None:
@@ -212,7 +195,7 @@ def unified_license_state(layout, *, now=None, account_id=None,
         return out
     out["trust_root"] = "ok"
 
-    # ---- machine / seat -----------------------------------------------------
+    # ---- machine ------------------------------------------------------------
     if fingerprint_info is None or machine_id is None:
         from .fingerprint import fingerprint
         fp = fingerprint()
@@ -220,6 +203,55 @@ def unified_license_state(layout, *, now=None, account_id=None,
             fingerprint_info = fp
         if machine_id is None:
             machine_id = fp.get("machine_id")
+
+    # ---- read the licence file / install-time trial --------------------------
+    read = read_license_file(lp)
+    if read["kind"] == "missing":
+        from .license import trial_state
+        trial = trial_state(layout, now=now, account_id=account_id,
+                            fingerprint_info=fingerprint_info, clock=clock)
+        if trial is not None:
+            out.update({k: v for k, v in trial.items()
+                        if k not in ("reasons", "notices")})
+            out["reasons"] = list(trial.get("reasons") or [])
+            out["notices"] = list(trial.get("notices") or [])
+            if trial.get("publish_allowed"):
+                out["level"] = "ok"
+                out["label"] = "试用中"
+                out["text"] = ("试用授权进行中，剩余 %s 天"
+                               % trial.get("days_left"))
+            else:
+                out["level"] = "bad"
+                out["label"] = STATUS_ZH.get(
+                    trial.get("status"), "试用授权被拒绝")
+                first = (out["reasons"] or ["试用授权未通过校验"])[0]
+                out["text"] = f"试用授权被拒绝（{out['label']}）：{first}"
+            return out
+        if clock_bad:
+            out["status"] = clock_status
+            out["level"] = "bad"
+            out["label"] = STATUS_ZH.get(clock_status, "时钟校验未通过")
+            out["reasons"].append(
+                _clock_zh(clock_status, clock.get("reason", ""))
+                + "：为防绕过试用期，新增发布已暂停；请校准系统时间后重试。")
+            out["text"] = "授权被拒绝（%s）：%s" % (
+                out["label"], out["reasons"][-1])
+            return out
+        out["reasons"].append(
+            "未找到授权文件（license.json），且没有可继续的试用记录：拒绝发布。")
+        out["notices"].append("请双击桌面「导入授权」导入服务商签发的 license.json。")
+        out["text"] = "未激活且试用不可用，新增发布暂停"
+        out["level"] = "warn"
+        return out
+    if read["kind"] != "ok":
+        out["status"] = STATUS_UNREADABLE
+        out["license_status"] = STATUS_UNREADABLE
+        out["reasons"].append(
+            f"授权文件损坏（{read['error']}）：新增发布暂停，抓数与历史数据不受影响。"
+            + REIMPORT_TEXT)
+        out["notices"].append("授权文件损坏：" + REIMPORT_TEXT)
+        out["text"] = "授权文件损坏，无法解析；新增发布暂停。" + REIMPORT_TEXT
+        return out
 
     # ---- gate (signature + machine + expiry + seat + clock) -----------------
     try:
@@ -233,8 +265,25 @@ def unified_license_state(layout, *, now=None, account_id=None,
         out["text"] = "授权文件字段异常；新增发布暂停。" + REIMPORT_TEXT
         return out
 
+    # A verified formal licence permanently ends the install-time trial.  Do
+    # this on observation too, so an installation upgraded from an older build
+    # is covered before the customer ever deletes license.json.
+    if gate.get("license_status") in ("OK", "GRACE", "EXPIRED"):
+        try:
+            from .license import mark_trial_license_seen
+            mark_trial_license_seen(layout, now=now,
+                                    fingerprint_info=fingerprint_info)
+        except Exception as exc:
+            out["tombstone_error"] = str(exc)
+            tombstone_failed = True
+        else:
+            tombstone_failed = False
+    else:
+        tombstone_failed = False
+
     status = gate.get("status")
-    if clock_bad and status in ("OK", "GRACE"):
+    out["license_status"] = gate.get("license_status") or status
+    if clock_bad and status in ("OK", "GRACE", STATUS_SEAT_DENIED):
         status = clock_status
     out["status"] = status
     out["publish_allowed"] = bool(gate.get("publish_allowed"))
@@ -243,6 +292,20 @@ def unified_license_state(layout, *, now=None, account_id=None,
     out["seat"] = gate.get("seat")
     out["notices"] = list(gate.get("notices") or [])
     out["reasons"] = list(gate.get("reasons") or [])
+    if tombstone_failed:
+        # An existing formal licence is valid, but the anti-replay tombstone
+        # could not be persisted.  Continuing would let a later delete of
+        # license.json restart the trial, so this observation/publish path must
+        # fail closed instead of merely recording the error.
+        out["publish_allowed"] = False
+        out["status"] = STATUS_TOMBSTONE_FAILED
+        status = STATUS_TOMBSTONE_FAILED
+        out["level"] = "bad"
+        out["reasons"].append(
+            "已读取正式授权，但防回放墓碑写入失败：%s；新增发布已暂停，"
+            "请检查磁盘/注册表权限后重试或联系服务商。"
+            % out["tombstone_error"])
+        out["notices"].append("防回放墓碑写入失败，本次不发布。")
 
     # Make the refusal explicit and Chinese-first, even for a bare bool from the
     # gate: every blocked state must carry a named reason.

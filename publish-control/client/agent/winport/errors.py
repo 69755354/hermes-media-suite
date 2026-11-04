@@ -33,8 +33,19 @@ class WinPortError(Exception):
         self.message = message
         if exit_code is not None:
             self.exit_code = exit_code
-        self.details = details or {}
-        self.code = code
+        # Subclasses declare ``code`` as a class attribute and may set their
+        # own ``details`` before calling super().  Assigning None/{} here used
+        # to shadow both, so every GateRed-derived error (for example the
+        # Xingtu duplicate gate) collapsed into the generic XINGTU_ERROR with
+        # an empty detail map by the time the control plane read it.
+        if details is not None:
+            self.details = details
+        elif not hasattr(self, 'details'):
+            self.details = {}
+        if code is not None:
+            self.code = code
+        elif not hasattr(self, 'code'):
+            self.code = None
 
 
 class StorageNotWritable(WinPortError):

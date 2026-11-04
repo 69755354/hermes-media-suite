@@ -50,7 +50,8 @@ class EvidenceStore:
 
     def __init__(self, layout, *, retention_days=None, settings=None):
         self.layout = layout
-        self.root = Path(getattr(layout, "evidence", layout.data / "evidence"))
+        from .customer_paths import layout_dir
+        self.root = layout_dir(layout, "evidence", "evidence")
         if retention_days is None:
             retention_days = (settings or {}).get("retention_days",
                                                   DEFAULT_RETENTION_DAYS)

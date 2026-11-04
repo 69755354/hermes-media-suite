@@ -1457,6 +1457,22 @@ def finish_remote(customer_id: str, op_id, ok, result, *, device_id=None, bindin
         c.close()
 
 
+def _safe_to_redeliver(row) -> bool:
+    """\u4e22\u4e86\u56de\u6267\u53ef\u4ee5\u91cd\u53d1\u7684\u547d\u4ee4\u3002
+
+    prepare/create/materials \u53ea\u8bfb\u7d20\u6750\u5e76\u5199 plan/preview\uff0c\u91cd\u53d1\u662f\u5e42\u7b49\u7684\uff1b
+    \u771f\u53d1\u5e03\uff08confirm\uff09\u4ecd\u4e0d\u91cd\u53d1\uff0c\u907f\u514d\u91cd\u590d\u63d0\u4ea4\u3002
+    """
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return False
+    if str(row["kind"] or "") != "publish":
+        return True
+    return str(payload.get("op") or "").lower() in (
+        "create", "prepare", "materials", "status")
+
+
 def poll_command(customer_id: str, channel: str | None = None,
                  include_unaddressed: bool = False, *, device_id=None, binding_epoch=None, device_token=None):
     """Atomically claim the oldest queued command for a customer.
@@ -1514,7 +1530,7 @@ def poll_command(customer_id: str, channel: str | None = None,
                 c.commit()
                 return None
             _target_guard(row, binding)
-            if binding.get("device_binding_enabled"):
+            if binding.get("device_binding_enabled") and not _safe_to_redeliver(row):
                 c.execute("UPDATE commands SET status='needs_reconcile', updated=? WHERE id=?", (now, row["id"]))
                 c.commit()
                 return None

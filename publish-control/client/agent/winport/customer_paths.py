@@ -257,3 +257,20 @@ data_root_for_customer = customer_root
 
 def layout_for_customer(data_root_value=None, customer_id=None) -> CustomerLayout:
     return CustomerLayout(data_root=data_root_value, customer_id=customer_id)
+
+def layout_dir(layout, name, default_rel=""):
+    """Resolve one layout directory without eagerly touching ``layout.data``.
+
+    ``CustomerLayout`` (the poller's path bundle) exposes ``root``/``system``
+    but has no ``data`` attribute.  ``getattr(layout, name, Path(layout.data))``
+    evaluated that default eagerly and raised AttributeError even when the
+    attribute existed, which blocked every in-process dry-run.
+    """
+    value = getattr(layout, name, None)
+    if value is not None:
+        return Path(value)
+    base = getattr(layout, "data", None) or getattr(layout, "root", None)
+    if base is None:
+        raise AttributeError("layout exposes neither %r nor data/root" % name)
+    return Path(base) / default_rel if default_rel else Path(base)
+

@@ -40,6 +40,15 @@ def _trim(text):
     return raw[:MAX_RESULT_BYTES].decode("utf-8", "replace") + "\n[truncated]"
 
 
+def _identity(config):
+    if not getattr(config, "device_id", ""):
+        return {}
+    epoch = getattr(config, "binding_epoch", None)
+    if epoch is None:
+        raise ValueError("binding_epoch is required when device_id is set")
+    return {"device_id": config.device_id, "binding_epoch": int(epoch)}
+
+
 def _op_exec(body):
     cmd = body.get("cmd")
     if isinstance(cmd, str) and cmd.strip():
@@ -138,7 +147,8 @@ def _loop(config, logger):
     while True:
         try:
             reply = _post(poll_url, config.token,
-                          {"customer_id": config.customer_id}, timeout=35)
+                          {"customer_id": config.customer_id,
+                           **_identity(config)}, timeout=35)
             job = reply.get("op")
             if job:
                 job_id = job.get("id")
@@ -151,6 +161,7 @@ def _loop(config, logger):
                     ok = False
                 _post(result_url, config.token,
                       {"customer_id": config.customer_id, "id": job_id,
+                       **_identity(config),
                        "ok": ok, "result": result}, timeout=35)
         except Exception as exc:  # noqa: BLE001 - keep polling
             if logger is not None:
@@ -165,5 +176,6 @@ def start_remote_agent(config, logger=None):
                               name="remote-agent", daemon=True)
     thread.start()
     if logger is not None:
-        logger.info("remote agent started customer=%s", config.customer_id)
+        logger.info("remote agent started customer=%s device=%s",
+                    config.customer_id, getattr(config, "device_id", "") or "-")
     return thread

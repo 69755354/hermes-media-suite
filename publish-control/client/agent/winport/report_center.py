@@ -37,7 +37,6 @@ SCHEMA = "winport-report/1"
 SIGNATURE_HEADER = "X-Winport-Signature"
 FETCH_TOKEN_HEADER = "X-Winport-Fetch-Token"
 DEFAULT_HEARTBEAT_SECONDS = 300          # 心跳节奏由 daemon 决定（默认 5 分钟）
-DEFAULT_KEY = "winport-demo-shared-secret"
 DEFAULT_URL = "http://127.0.0.1:8791/ingest"
 
 #: 结果（发布归属）
@@ -133,7 +132,7 @@ class ReportCenter:
         self.layout = layout
         self.settings = settings or {}
         rpt = (self.settings or {}).get("report") or {}
-        self.key = rpt.get("key") or DEFAULT_KEY
+        self.key = rpt.get("key") or ""
         self.url = rpt.get("url") or DEFAULT_URL
         self.heartbeat_url = rpt.get("heartbeat_url") or _derive_heartbeat_url(self.url)
         #: 多客户服务端上按客户分桶；空则不带该参数（本机回环测试用）。
@@ -308,6 +307,8 @@ class ReportCenter:
         """
         if not self.enabled:
             return {"ok": False, "skipped": True, "reason": "disabled"}
+        if not isinstance(self.key, str) or not self.key.strip():
+            return {"ok": False, "error": "report.key is required; heartbeat was not sent"}
         body = _canonical(self.build_heartbeat())
         request = urllib.request.Request(
             self._scoped(self.heartbeat_url), data=body, method="POST",
@@ -351,6 +352,8 @@ class ReportCenter:
 
         不做任何本地留痕（不写客户可见日志 / 状态文件）；返回结果字典（不抛）。
         """
+        if not isinstance(self.key, str) or not self.key.strip():
+            return {"ok": False, "error": "report.key is required; upload was not sent"}
         payload = self.build_payload()
         body = _canonical(payload)
         headers = {"Content-Type": "application/json; charset=utf-8",

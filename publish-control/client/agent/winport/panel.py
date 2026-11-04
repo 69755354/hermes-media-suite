@@ -242,6 +242,27 @@ def build_state(layout, channels, *, envs=None, tcp=None, processes=None,
         from .version import VERSION as _VERSION_VALUE
     except Exception:
         _VERSION_VALUE = ""
+    account_licenses = {}
+    for row in rows:
+        account_id = row.get("account_id")
+        if not account_id:
+            continue
+        if account_id not in account_licenses:
+            account_licenses[account_id] = license_banner(
+                layout, account_id=account_id)
+        row["license"] = account_licenses[account_id]
+    for environment in environments:
+        environment["license"] = _worst_license(
+            [row.get("license") for row in (environment.get("rows") or [])
+             if row.get("license")])
+    base_license = license_banner(layout)
+    denied = [item for item in account_licenses.values()
+              if item.get("publish_allowed") is False]
+    header_license = denied[0] if denied else base_license
+    if len(denied) > 1:
+        header_license = dict(header_license)
+        header_license["text"] = ("%d 个账号授权被拒绝；%s"
+                                  % (len(denied), header_license.get("text", "")))
     return {"title": APP_NAME_DISPLAY,
             "version": _VERSION_VALUE,
             "environments": environments,
@@ -251,7 +272,7 @@ def build_state(layout, channels, *, envs=None, tcp=None, processes=None,
                                if visible_envs is None
                                or r.get("env_id") in {e.env_id for e in visible_envs}]),
             "chrome": chrome_banner(layout, report=chrome_report),
-            "license": license_banner(layout),
+            "license": header_license,
             "evidence": evidence_banner(layout),
             "cadence": cadence_mod.cadence_view(layout),
             "remote_channel": __import__("winport.settings", fromlist=["load_settings"]).load_settings(layout.settings_file).get("remote_channel", {"enabled": True}),
@@ -294,6 +315,7 @@ def license_banner(layout, *, license_path=None, public_key=None,
             public_key=public_key, public_key_path=public_key_path)
     except Exception as exc:                        # last-ditch: never crash the panel
         return {"level": "bad", "days_left": None,
+                "publish_allowed": False,
                 "text": "\u6388\u6743\u72b6\u6001\u65e0\u6cd5\u8ba1\u7b97\uff1b\u65b0\u589e\u53d1\u5e03\u6682\u505c\uff0c\u6293\u6570\u4e0e\u5386\u53f2\u6570\u636e\u4e0d\u53d7\u5f71\u54cd\u3002"
                         "\u8bf7\u91cd\u65b0\u5bfc\u5165\u670d\u52a1\u5546\u7b7e\u53d1\u7684 license.json\u3002",
                 "notices": [f"\u6388\u6743\u72b6\u6001\u5f02\u5e38\uff1a{exc}"],
@@ -301,9 +323,13 @@ def license_banner(layout, *, license_path=None, public_key=None,
                 "clock_rollback": False}
     return {"level": state.get("level", "warn"),
             "days_left": state.get("days_left"),
+            "publish_allowed": bool(state.get("publish_allowed")),
             "text": state.get("text", ""),
             "notices": state.get("notices", []),
             "status": state.get("status"),
+            "license_status": state.get("license_status"),
+            "account_id": state.get("account_id", account_id),
+            "seat": state.get("seat"),
             "reasons": state.get("reasons", []),
             "clock_rollback": state.get("clock_rollback", False)}
 
@@ -370,6 +396,13 @@ def _chrome_view(banner) -> dict:
 def _auth_view(licence) -> dict:
     """One short authorisation line; no technical or file-format wording."""
     status = (licence or {}).get("status")
+    if (licence or {}).get("publish_allowed") is False:
+        if status == "SEAT_DENIED":
+            return {"level": "bad", "text": "\u5f53\u524d\u8d26\u53f7\u672a\u6388\u6743\u6216\u5df2\u505c\u7528"}
+        return {"level": "bad", "text": "\u6388\u6743\u88ab\u62d2\u7edd\uff08%s\uff09" % (
+            status or "\u672a\u901a\u8fc7\u6821\u9a8c")}
+    if status == "TRIAL":
+        return {"level": "ok", "text": "\u8bd5\u7528\u6388\u6743\u4e2d"}
     if status == "OK":
         return {"level": "ok", "text": "\u6388\u6743\u6709\u6548"}
     if status == "GRACE":
@@ -383,12 +416,24 @@ def _auth_view(licence) -> dict:
     return {"level": "warn", "text": "\u6388\u6743\u9700\u8981\u5904\u7406"}
 
 
+def _worst_license(items):
+    """Pick a refused account verdict before an allowed one."""
+    items = [item for item in (items or []) if item]
+    for item in items:
+        if item.get("publish_allowed") is False:
+            return item
+    return items[0] if items else {}
+
+
 def _platform_row(row) -> str:
     status_text, color, hint = _platform_state(row)
     account_state = row.get("account_state")
     status_class = (_account_status_class(account_state) if account_state
                     else _env_status_class(row.get("status")))
     hint_html = f'<p class="phint">{html.escape(hint)}</p>' if hint else ""
+    licence_view = _auth_view(row.get("license") or {})
+    licence_html = ('<p class="phint">\u8d26\u53f7\u6388\u6743\uff1a%s</p>'
+                    % html.escape(str(licence_view.get("text") or "")))
     channel_id = html.escape(str(row.get("channel_id", "")))
     platform_name = html.escape(str(row.get("platform_name") or row.get("platform") or ""))
     return f"""
@@ -400,7 +445,7 @@ def _platform_row(row) -> str:
           <button onclick="act('open','{channel_id}',this)">\u5f00\u59cb\u767b\u5f55</button>
           <button onclick="act('check','{channel_id}',this)">\u6211\u767b\u5f55\u597d\u4e86</button>
         </span>
-        {hint_html}
+        {hint_html}{licence_html}
       </div>"""
 
 
@@ -417,6 +462,9 @@ def _env_card(card) -> str:
     label = html.escape(str(card.get("label") or card.get("env_id") or ""))
     disabled = bool(card.get("enabled") is False)
     disabled_text = "\uff08\u5df2\u505c\u7528\uff09" if disabled else ""
+    licence_view = _auth_view(card.get("license") or {})
+    licence_text = html.escape(str(licence_view.get("text") or ""))
+    licence_class = html.escape(str(licence_view.get("level") or "warn"))
     return f"""
   <section class="card" id="{env_id}" data-env="{env_id}">
     <div class="head">
@@ -424,6 +472,7 @@ def _env_card(card) -> str:
       <h2>{label}{disabled_text}</h2>
       <span class="status {status_class}">{status_text}</span>
     </div>
+    <p class="licence {licence_class}">\u8d26\u53f7\u6388\u6743\uff1a{licence_text}</p>
     <div class="plats">{platform_html}</div>
     <div class="env-actions">
       <button class="danger" onclick="disableEnv('{env_id}',this)">\u505c\u7528\u8d26\u53f7</button>

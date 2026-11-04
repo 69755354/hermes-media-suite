@@ -191,18 +191,7 @@ def build_preview(plan: dict, *, envs=None, channels=None, settings=None,
                                          max_horizon_days=max_horizon)
             if publishing:
                 age = (now - parsed).total_seconds()
-                # The approval receipt is valid for 30 minutes; the submit
-                # window must not be shorter than that, otherwise a slow
-                # upload finishes after the plan time and the (still valid)
-                # receipt is rejected at submit.  Keep it configurable.
-                _submit_window = int((settings.get("schedule") or {}).get(
-                    "publish_submit_window_minutes", 30)) * 60
-                if age < 0:
-                    ok, reason = False, "尚未到发布时间"
-                elif age > _submit_window:
-                    ok, reason = False, "已逾期超过 %d 分钟" % (_submit_window // 60)
-                else:
-                    ok, reason = True, ""
+                ok, reason = 0 <= age <= 600, "尚未到发布时间或已逾期超过 10 分钟"
             if not ok:
                 bad("SCHEDULE_OUT_OF_WINDOW", "schedule_at",
                     f"计划时间不在合法窗口内（{reason}）")

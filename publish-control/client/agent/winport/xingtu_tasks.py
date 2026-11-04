@@ -47,6 +47,52 @@ DOUYIN_PUBLISH_URL = "https://creator.douyin.com/creator-micro/content/post/vide
 STATUS_FOUND = "FOUND"
 STATUS_NOT_FOUND = "NOT_FOUND"
 STATUS_UNKNOWN = "UNKNOWN"
+RESOLVE_OK = "ok"
+RESOLVE_NOT_FOUND = "not_found"
+RESOLVE_AMBIGUOUS = "ambiguous"
+RESOLVE_UNAVAILABLE = "unavailable"
+TASK_REF_SCHEMA = 2
+
+#: The one task-family contract shared by the bot and the client.  ``token`` is
+#: the only value that may be written as a legacy ``task_name``; ``keywords``
+#: are material-name inputs only.  Customer names are deliberately absent.
+TASK_FAMILIES = {
+    "free": {
+        "token": "\u514d\u8d39-\u65b0\u7801",
+        "keywords": ("\u514d\u8d39-\u65b0\u7801", "\u514d\u8d39"),
+    },
+    "incentive": {
+        "token": "\u6fc0\u52b1-\u65b0\u7801",
+        "keywords": ("\u6fc0\u52b1-\u65b0\u7801", "\u6fc0\u52b1"),
+    },
+    "app_seed": {
+        "token": "APP\u79cd\u8349",
+        "keywords": ("APP\u79cd\u8349", "\u79cd\u8349"),
+    },
+    "drama": {
+        "token": "\u5267\u96c6\u526a\u8f91",
+        "keywords": ("\u5267\u96c6\u526a\u8f91", "\u5267\u96c6", "\u526a\u8f91"),
+    },
+}
+
+CLIENT_CAPABILITIES = (
+    "xingtu_task_contract_v2",
+    "xingtu_picker_preflight_v2",
+    "error_envelope_v2",
+)
+
+_KNOWN_BAD_TASK_NAME_MARKERS = ("\u4f18\u77e9",)
+_ERROR_CODE_ALIASES = {
+    "XINGTU.DEDUP.LEDGER_ERROR": "XINGTU_DEDUP_LEDGER_ERROR",
+    "XINGTU.DEDUP.LEDGER_LOCK_ERROR": "XINGTU_DEDUP_LEDGER_ERROR",
+    "XINGTU.DEDUP.LEDGER_LOCK_TIMEOUT": "XINGTU_DEDUP_LEDGER_ERROR",
+}
+
+
+def normalize_error_code(value) -> str:
+    """Return one stable, upper-case error code for all consumers."""
+    code = "" if value is None else str(value).strip().upper()
+    return _ERROR_CODE_ALIASES.get(code, code)
 
 #: Local ledger of task names we have already published.  It lives under the
 #: publish-worker data directory (``<data>/run/xingtu_used_tasks.json``).
@@ -54,16 +100,6 @@ USED_TASKS_FILENAME = "xingtu_used_tasks.json"
 USED_TASKS_VERSION = 1
 USED_TASKS_LOCK_TIMEOUT_SECONDS = 10.0
 USED_TASKS_LOCK_POLL_SECONDS = 0.05
-
-#: Material keyword -> star task name shown in the Douyin picker.
-#: Kept identical to ``feishu_publish_bot.bot.XINGTU_TASK_LABELS``: dates are
-#: deliberately excluded because the backend renames tasks over time.
-XINGTU_TASK_LABELS = (
-    ("\u514d\u8d39-\u65b0\u7801", ("\u514d\u8d39",)),
-    ("\u6fc0\u52b1-\u65b0\u7801", ("\u6fc0\u52b1",)),
-    ("APP\u79cd\u8349", ("APP\u79cd\u8349", "\u79cd\u8349")),
-    ("\u5267\u96c6\u526a\u8f91", ("\u5267\u96c6", "\u526a\u8f91")),
-)
 
 _ORDER_RE = re.compile(
     r"(?:order_id|orderId|orderid|order%5Fid|task_id|taskId|taskid)"
@@ -126,60 +162,163 @@ _GENERIC_TASK_LABEL = "\u4efb\u52a1"
 class XingtuError(Exception):
     """Base class for a Xingtu operation that must stop the publish."""
 
+    code = "XINGTU_ERROR"
+    failure_scope = "task"
+    retryable = False
+    action = "manual_check"
+    stage = "confirm"
+
+    def __init__(self, message="", *, code=None, details=None,
+                 failure_scope=None, retryable=None, action=None, stage=None):
+        if code:
+            self.code = str(code)
+        if details is not None:
+            self.details = dict(details or {})
+        else:
+            self.details = {}
+        if failure_scope:
+            self.failure_scope = str(failure_scope)
+        if retryable is not None:
+            self.retryable = bool(retryable)
+        if action:
+            self.action = str(action)
+        if stage:
+            self.stage = str(stage)
+        super().__init__(str(message or self.code))
+
 
 class XingtuTaskUnavailable(XingtuError):
     """The backend list could not be read or yielded no attributable tasks."""
+
+    code = "XINGTU_TASK_UNAVAILABLE"
+    failure_scope = "task"
+    action = "choose_another_task"
 
 
 class XingtuNotSignedIn(XingtuTaskUnavailable):
     """The backend showed a login page; the operator must sign in again."""
 
+    code = "XINGTU_CLIENT_SIGNED_OUT"
+    failure_scope = "client"
+    action = "sign_in"
+
 
 class XingtuTaskListEmpty(XingtuTaskUnavailable):
     """The backend loaded a real task list, but it contained no tasks."""
+
+    code = "XINGTU_TASK_NOT_FOUND"
 
 
 class XingtuTaskDetailUnreadable(XingtuTaskUnavailable):
     """Task rows exist, but their detail pages did not yield an order id."""
 
+    code = "XINGTU_TASK_UNAVAILABLE"
+
 
 class XingtuTaskNotAttached(XingtuError):
     """The upload page does not show the selected task; never click publish."""
+
+    code = "XINGTU_TASK_NOT_ATTACHED"
+    failure_scope = "task"
+    action = "manual_check"
+
+
+class XingtuTaskNotFound(XingtuError):
+    """No live picker card matches the requested task identity."""
+
+    code = "XINGTU_TASK_NOT_FOUND"
+    failure_scope = "task"
+    action = "choose_another_task"
+
+
+class XingtuTaskAmbiguous(XingtuError):
+    """More than one live picker card matches; never choose the first one."""
+
+    code = "XINGTU_TASK_AMBIGUOUS"
+    failure_scope = "task"
+    action = "choose_exact_task"
+
+
+class XingtuTaskChanged(XingtuError):
+    """The picker card changed or disappeared between preflight and attach."""
+
+    code = "XINGTU_TASK_CHANGED"
+    failure_scope = "task"
+    action = "retry_or_reconfirm"
+
+
+class XingtuPlanSchemaInvalid(XingtuError):
+    """The plan's task selector cannot be interpreted safely."""
+
+    code = "XINGTU_PLAN_SCHEMA_INVALID"
+    failure_scope = "batch"
+    action = "regenerate_plan"
 
 
 class XingtuAlreadySubmitted(XingtuError):
     """This order id + video already appears in the task submission list."""
 
+    code = "XINGTU_ALREADY_SUBMITTED"
+    failure_scope = "item"
+    action = "change_material"
+
 
 class XingtuDuplicateCheckUnavailable(XingtuError):
     """The duplicate check could not be completed; do not risk a second submit."""
 
+    code = "XINGTU_DUPLICATE_CHECK_UNKNOWN"
+    failure_scope = "client"
+    action = "contact_admin"
+
 
 class XingtuDuplicateLocal(GateRed):
-    """The local ledger already contains this task name or order id."""
+    """The local ledger already contains this exact task and material."""
 
-    code = "xingtu.duplicate_local"
+    code = "XINGTU_DUPLICATE_LOCAL"
+    failure_scope = "item"
+    retryable = False
+    action = "change_material"
+    stage = "confirm"
 
-    def __init__(self, task_name, matched=None):
+    def __init__(self, task_name, matched=None, *, details=None):
         matched = matched if isinstance(matched, dict) else {}
         name = _text(task_name) or _text(matched.get("task_name")) \
             or _text(matched.get("order_id"))
         self.matched = matched
+        self.details = dict(details or matched or {})
+        self.details.setdefault("task_name", name)
+        self.details.setdefault(
+            "task_name_full", _text(matched.get("task_name_full")) or name)
+        self.details.setdefault("published_at",
+                                _text(matched.get("published_at")))
+        self.details.setdefault("media_sha256_prefix",
+                                _text(matched.get("media_sha256_prefix")))
+        self.details.setdefault("matched_by", _text(matched.get("matched_by")))
         super().__init__(
-            "xingtu.duplicate_local: 本地已投过同名任务 " + name,
-            code=self.code)
+            "同素材 + 同任务已投过「" + name + "」；系统未重复发布。")
+
+
+class XingtuDuplicatePossibleLocal(XingtuDuplicateLocal):
+    """A legacy family-only ledger entry may match; require manual review."""
+
+    code = "XINGTU_DUPLICATE_POSSIBLE_LOCAL"
+    action = "contact_admin"
 
 
 class XingtuDedupLedgerError(GateRed):
     """The local used-task ledger is unreadable or unwritable; fail closed."""
 
-    code = "xingtu.dedup.ledger_error"
+    code = "XINGTU_DEDUP_LEDGER_ERROR"
+    failure_scope = "client"
+    retryable = False
+    action = "contact_admin"
+    stage = "confirm"
 
     def __init__(self, message, code=None):
         if code:
-            self.code = str(code)
-        super().__init__("xingtu.dedup.ledger_error: " + str(message),
-                         code=self.code)
+            self.code = normalize_error_code(code)
+        self.details = {"reason": str(message or "")}
+        super().__init__("本地防重账本不可用，已停止发布；请联系管理员。")
 
 
 def _text(value) -> str:
@@ -192,11 +331,264 @@ def _normal(value) -> str:
 
 def normalize_task_name(value) -> str:
     """Normalize a task name for strict equality, never substring matching."""
-    text = _text(value).replace("\u200b", "")
+    text = _text(value)
+    for char in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        text = text.replace(char, "")
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"\s+", "", text)
     text = re.sub(r"[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D_]", "-", text)
     return re.sub(r"^\u4efb\u52a1[:\uff1a]?", "", text)
+
+
+def canonical_task_name(family) -> str:
+    """Return the canonical legacy token for a stable task family."""
+    spec = TASK_FAMILIES.get(str(family or ""))
+    return spec["token"] if spec else ""
+
+
+def _is_known_bad_task_alias(text, *, full_name=False) -> bool:
+    if not any(marker in text for marker in _KNOWN_BAD_TASK_NAME_MARKERS):
+        return False
+    if not full_name:
+        return True
+    # Exact picker titles can legitimately carry the customer segment.  Only
+    # trust it when the canonical token is followed by the numeric task suffix;
+    # short aliases such as "APP\u79cd\u8349-\u4f18\u77e9\u4e92\u52a8" stay rejected.
+    for spec in TASK_FAMILIES.values():
+        token = normalize_task_name(spec.get("token")).upper()
+        if token and re.search(r"(?:^|-)%s-\d+(?:-|$)" % re.escape(token), text):
+            return False
+    return True
+
+
+def resolve_task_family(value, *, full_name=False) -> str:
+    """Resolve one material name or task label to a stable family.
+
+    Canonical task tokens win over generic material keywords, so ``APP种草``
+    is not mistaken for a generic ``种草`` rule in another family.  An
+    unknown label or a known bad alias returns ``""`` and callers must fail
+    closed.  ``full_name`` is reserved for exact picker titles; even then the
+    customer-name segment is accepted only with the canonical numeric suffix.
+    """
+    text = normalize_task_name(value).upper()
+    if not text:
+        return ""
+    if _is_known_bad_task_alias(text, full_name=full_name):
+        return ""
+    token_hits = [family for family, spec in TASK_FAMILIES.items()
+                  if normalize_task_name(spec.get("token")).upper() in text]
+    if token_hits:
+        return token_hits[0] if len(set(token_hits)) == 1 else ""
+    keyword_hits = []
+    for family, spec in TASK_FAMILIES.items():
+        for keyword in spec.get("keywords") or ():
+            if normalize_task_name(keyword).upper() in text:
+                keyword_hits.append(family)
+                break
+    if len(set(keyword_hits)) == 1:
+        return keyword_hits[0]
+    if len(set(keyword_hits)) > 1:
+        return ""
+    if re.search(r"FREE\d", text):
+        return "free"
+    return ""
+
+
+def task_ref_for(family, *, source="material", display_name="", exact=None,
+                 full_name="", order_id="") -> dict:
+    """Build the additive schema-2 task reference written next to legacy fields."""
+    family = str(family or "")
+    if family not in TASK_FAMILIES:
+        raise XingtuPlanSchemaInvalid("unknown Xingtu task family: %r" % family)
+    token = canonical_task_name(family)
+    order_id = normalize_order_id(order_id)
+    full_name = normalize_task_name(full_name)
+    exact = normalize_task_name(exact) if exact else None
+    if order_id:
+        match = {"kind": "order_id", "value": order_id}
+    elif full_name:
+        match = {"kind": "full_name", "value": full_name}
+    else:
+        match = {"kind": "family_token", "value": token}
+    if exact is None:
+        exact = order_id or full_name or None
+    return {
+        "schema": TASK_REF_SCHEMA,
+        "family": family,
+        "match": match,
+        "exact": exact,
+        "source": str(source or "material"),
+        "display_name": normalize_task_name(display_name) or token,
+    }
+
+
+def _invalid_schema(message):
+    raise XingtuPlanSchemaInvalid(message, details={"reason": str(message)})
+
+
+def parse_task_ref(ref) -> dict:
+    """Validate and normalize a schema-2 task reference; never guess."""
+    if not isinstance(ref, dict):
+        _invalid_schema("xingtu_task_ref must be an object")
+    try:
+        schema = int(ref.get("schema"))
+    except (TypeError, ValueError):
+        _invalid_schema("xingtu_task_ref.schema must be 2")
+    if schema != TASK_REF_SCHEMA:
+        _invalid_schema("unsupported xingtu_task_ref.schema")
+    family = str(ref.get("family") or "").strip()
+    if family not in TASK_FAMILIES:
+        _invalid_schema("xingtu_task_ref.family is not in the whitelist")
+    match = ref.get("match")
+    if not isinstance(match, dict):
+        _invalid_schema("xingtu_task_ref.match must be an object")
+    kind = str(match.get("kind") or "").strip()
+    value = match.get("value")
+    if kind not in ("order_id", "full_name", "family_token"):
+        _invalid_schema("xingtu_task_ref.match.kind is unsupported")
+    if kind == "order_id":
+        value = normalize_order_id(value)
+    else:
+        value = normalize_task_name(value)
+    if not value:
+        _invalid_schema("xingtu_task_ref.match.value is empty")
+    token = canonical_task_name(family)
+    if kind == "family_token" and value != token:
+        _invalid_schema("family_token does not match the selected family")
+    if kind == "full_name":
+        if token not in value:
+            _invalid_schema("full_name must contain the canonical task token")
+        if resolve_task_family(value, full_name=True) != family:
+            _invalid_schema("full_name does not belong to the selected family")
+    display = normalize_task_name(ref.get("display_name")) or token
+    exact = ref.get("exact")
+    exact = (normalize_order_id(exact) if kind == "order_id"
+             else normalize_task_name(exact) if exact else "")
+    return {
+        "schema": TASK_REF_SCHEMA,
+        "family": family,
+        "match": {"kind": kind, "value": value},
+        "exact": exact or None,
+        "source": _text(ref.get("source")) or "material",
+        "display_name": display,
+    }
+
+
+def task_selector(task) -> dict:
+    """Return the normalized selector carried by a task dictionary."""
+    task = task if isinstance(task, dict) else {}
+    ref = task.get("task_ref") if isinstance(task.get("task_ref"), dict) else None
+    if ref:
+        parsed = parse_task_ref(ref)
+        return {
+            "kind": parsed["match"]["kind"],
+            "value": parsed["match"]["value"],
+            "family": parsed["family"],
+            "full_name": (parsed["match"]["value"]
+                          if parsed["match"]["kind"] == "full_name" else ""),
+            "order_id": (parsed["match"]["value"]
+                         if parsed["match"]["kind"] == "order_id" else ""),
+            "display_name": parsed["display_name"],
+        }
+    order_id = normalize_order_id(task.get("order_id"))
+    full_name = normalize_task_name(task.get("task_name_full"))
+    family = str(task.get("family") or "")
+    name = normalize_task_name(task.get("task_name"))
+    if not family and name:
+        family = resolve_task_family(name)
+    token = canonical_task_name(family)
+    if order_id:
+        return {"kind": "order_id", "value": order_id, "family": family,
+                "full_name": full_name, "order_id": order_id,
+                "display_name": name or full_name or token}
+    if full_name:
+        return {"kind": "full_name", "value": full_name, "family": family,
+                "full_name": full_name, "order_id": "",
+                "display_name": name or full_name}
+    if name and token and token in name:
+        return {"kind": "family_token", "value": token, "family": family,
+                "full_name": name if name != token else "", "order_id": "",
+                "display_name": name}
+    return {"kind": "", "value": "", "family": family, "full_name": "",
+            "order_id": "", "display_name": name}
+
+
+def render_error_message(code, details=None) -> str:
+    """Render a stable code as customer-facing Chinese, never as a raw code."""
+    code = normalize_error_code(code)
+    details = details if isinstance(details, dict) else {}
+    task = _text(details.get("task_name_full")) or _text(details.get("task_name"))
+    when = _text(details.get("published_at"))
+    prefix = _text(details.get("media_sha256_prefix"))
+    candidates = [str(item.get("task_name") or item.get("name") or "")
+                  for item in (details.get("candidates") or [])
+                  if isinstance(item, dict)]
+    candidates = [item for item in candidates if item][:8]
+    quoted = "「%s」" % task if task else "该星图任务"
+    if code == "XINGTU_TASK_NOT_FOUND":
+        suffix = ("。可选任务：" + "、".join(candidates[:4])) if candidates else ""
+        return "发布页找不到" + quoted + suffix + "。请确认任务仍在后重新选择。"
+    if code == "XINGTU_TASK_AMBIGUOUS":
+        suffix = ("。候选：" + "、".join(candidates)) if candidates else ""
+        return "同一类星图任务有多张，系统不会替你选第一张" + suffix + "。请指定完整任务名或 order_id。"
+    if code == "XINGTU_TASK_CHANGED":
+        return quoted + "在发布过程中发生变化或消失，已停止，不会点击发布。请重新确认后再试。"
+    if code == "XINGTU_TASK_UNAVAILABLE":
+        return quoted + "当前不可用（已结束、下线或抢光），请换任务或等任务恢复。"
+    if code == "XINGTU_TASK_NOT_ATTACHED":
+        return quoted + "没有成功挂到发布页，已停止，不会发成无任务。请人工确认页面。"
+    if code in ("XINGTU_DUPLICATE_LOCAL", "XINGTU_DUPLICATE_POSSIBLE_LOCAL"):
+        bits = ["同素材 + 同任务已投过" + quoted]
+        if when:
+            bits.append("发布时间 %s" % when)
+        if prefix:
+            bits.append("素材指纹 %s" % prefix)
+        if code == "XINGTU_DUPLICATE_POSSIBLE_LOCAL":
+            bits.append("旧账本只能确认同任务族，需管理员人工核对")
+        else:
+            bits.append("系统没有重复发布")
+        return "；".join(bits) + "。"
+    if code == "XINGTU_DEDUP_LEDGER_ERROR":
+        return "本地防重账本不可用，已停止发布。请联系管理员修复账本。"
+    if code == "XINGTU_PLAN_SCHEMA_INVALID":
+        return "星图任务计划格式无效，已阻止发布。请重新生成计划。"
+    if code == "XINGTU_CLIENT_CAPABILITY_MISSING":
+        return "当前发布助手版本不支持所需能力，请升级客户端。"
+    if code == "XINGTU_ALREADY_SUBMITTED":
+        return "同素材 + 同任务在星图后台已经提交过，系统没有重复发布。请换素材或人工核对。"
+    if code == "XINGTU_DUPLICATE_CHECK_UNKNOWN":
+        return "本地防重检查无法完成，已停止发布。请联系管理员。"
+    if code == "XINGTU_CLIENT_SIGNED_OUT":
+        return "星图登录状态已失效，请重新登录后再发布。"
+    if code == "CLIENT_UNREACHABLE":
+        return "客户机暂时连不上，请检查客户机开机、联网且发布助手正在运行。"
+    return "发布没有完成，请稍后重试；如反复失败请联系管理员。"
+
+
+def error_envelope(exc, *, client_version="", capabilities=None,
+                   stage=None) -> dict:
+    """Return the stable client error envelope used by the bot and tests."""
+    code = normalize_error_code(
+        getattr(exc, "code", "XINGTU_ERROR") or "XINGTU_ERROR")
+    details = dict(getattr(exc, "details", {}) or {})
+    message = render_error_message(code, details)
+    scope = str(getattr(exc, "failure_scope", "task") or "task")
+    return {
+        "ok": False,
+        "published": False,
+        "stage": str(stage or getattr(exc, "stage", "confirm") or "confirm"),
+        "code": code,
+        "message": message,
+        "error": message,
+        "xingtu_error": message,
+        "retryable": bool(getattr(exc, "retryable", False)),
+        "failure_scope": scope,
+        "action": str(getattr(exc, "action", "manual_check") or "manual_check"),
+        "details": details,
+        "problems": [{"code": code, "message": message}],
+        "client_version": str(client_version or ""),
+        "capabilities": list(capabilities or CLIENT_CAPABILITIES),
+    }
 
 
 def normalize_order_id(value) -> str:
@@ -295,7 +687,7 @@ class _UsedTasksLock:
                 "cannot open lock %s: %s" % (
                     _ledger_label(self.lock_path),
                     _ledger_error_text(self.lock_path, exc)),
-                code="xingtu.dedup.ledger_lock_error") from exc
+                code="XINGTU_DEDUP_LEDGER_ERROR") from exc
         while True:
             try:
                 self._try_lock()
@@ -308,7 +700,7 @@ class _UsedTasksLock:
                         "ledger lock timeout on %s after %.1fs: %s" % (
                             _ledger_label(self.lock_path), self.timeout,
                             _ledger_error_text(self.lock_path, exc)),
-                        code="xingtu.dedup.ledger_lock_timeout") from exc
+                        code="XINGTU_DEDUP_LEDGER_ERROR") from exc
                 time.sleep(min(USED_TASKS_LOCK_POLL_SECONDS, remaining))
 
     def _close_handle(self):
@@ -410,54 +802,147 @@ def load_used_tasks(path) -> dict:
 def find_used_task(path, task, media_sha256="") -> tuple[dict, str] | tuple[None, str]:
     """Return ``(entry, matched_by)`` when this task was already published.
 
-    ``task_name`` is often a campaign keyword (for example ``APP种草``) that
-    several videos in the same batch share, so a name match alone must never
-    block a publish.  A duplicate is the same task identity carrying the same
-    media fingerprint; legacy entries without a fingerprint keep blocking only
-    on an exact order id, the narrowest safe fallback.
+    A definite duplicate is the same full task name or order id carrying the
+    same media fingerprint.  Legacy entries that only carry the family token
+    can prove less, so they return a ``*_possible`` marker and the caller must
+    still fail closed for manual review.
     """
     payload = load_used_tasks(path)
     task = task if isinstance(task, dict) else {}
+    target_selector = task_selector(task)
     target_name = normalize_task_name(task.get("task_name"))
-    target_order = normalize_order_id(task.get("order_id"))
+    target_full = normalize_task_name(
+        task.get("task_name_full") or target_selector.get("full_name"))
+    target_order = normalize_order_id(
+        task.get("order_id") or target_selector.get("order_id"))
+    target_family = str(task.get("family") or
+                        target_selector.get("family") or "")
     target_media = normalize_order_id(media_sha256)
+    target_exact = (("order", target_order) if target_order else
+                    ("full", target_full) if target_full else None)
+
+    def enrich(entry, matched_by, *, possible=False):
+        detail = dict(entry)
+        entry_name = normalize_task_name(entry.get("task_name"))
+        entry_full = normalize_task_name(entry.get("task_name_full"))
+        entry_family = str(entry.get("task_family") or
+                           resolve_task_family(entry.get("task_name")) or "")
+        entry_media = normalize_order_id(entry.get("media_sha256"))
+        detail.update({
+            "task_name": entry_name,
+            "task_name_full": entry_full or entry_name,
+            "task_family": entry_family,
+            "media_sha256_prefix": entry_media[:12],
+            "published_at": _text(entry.get("published_at")),
+            "matched_by": matched_by,
+            "duplicate_kind": "possible" if possible else "definite",
+        })
+        return detail
+
+    possible = None
     for entry in payload["tasks"]:
         entry_name = normalize_task_name(entry.get("task_name"))
         entry_order = normalize_order_id(entry.get("order_id"))
+        entry_full = normalize_task_name(entry.get("task_name_full"))
+        entry_family = str(entry.get("task_family") or
+                           resolve_task_family(entry_name) or "")
         entry_media = normalize_order_id(entry.get("media_sha256"))
-        same_name = bool(target_name and entry_name and target_name == entry_name)
         same_order = bool(target_order and entry_order and target_order == entry_order)
-        if not (same_name or same_order):
-            continue
-        matched_by = "order_id" if same_order else "task_name"
-        if target_media and entry_media:
+        same_full = bool(target_full and entry_full and target_full == entry_full)
+        same_legacy_name = bool(target_name and entry_name and
+                                target_name == entry_name)
+
+        if same_order:
+            if target_media and entry_media and target_media == entry_media:
+                return enrich(entry, "order_id+media"), "order_id+media"
+            if not entry_media and possible is None:
+                # Exact order id without a media fingerprint still cannot be
+                # called a definite duplicate; require manual review.
+                possible = (enrich(entry, "order_id", possible=True),
+                            "order_id_possible")
+        if same_full:
+            if not target_media or not entry_media:
+                if possible is None:
+                    possible = (enrich(entry, "task_name_full", possible=True),
+                                "task_name_full_possible")
+                continue
             if target_media == entry_media:
-                return entry, matched_by + "+media"
+                return enrich(entry, "task_name_full+media"), "task_name_full+media"
             continue
-        if not entry_media:
-            if same_order:
-                return entry, "order_id"
+
+        # A family token cannot identify the exact card when the family has
+        # several live tasks.  Same family + same media is therefore only a
+        # possible duplicate unless both sides carry the same exact identity.
+        # This also covers a new family-only plan matching an older entry that
+        # already has a full name/order id.
+        legacy_entry = not entry_full and not entry_order
+        if not (target_media and entry_media and target_media == entry_media):
             continue
-        return entry, matched_by
+        entry_exact = (("order", entry_order) if entry_order else
+                       ("full", entry_full) if entry_full else None)
+        if same_legacy_name and legacy_entry:
+            matched_by = "legacy_family+media"
+        elif target_family and entry_family and target_family == entry_family:
+            if target_full and entry_full and target_full != entry_full:
+                continue
+            if target_exact and entry_exact and target_exact != entry_exact:
+                # Two different full names or two different order ids prove
+                # different tasks.  A full name vs an order id cannot be
+                # compared without a mapping, so fail closed for review.
+                if target_exact[0] != entry_exact[0] and possible is None:
+                    matched_by = "family+media"
+                    possible = (enrich(entry, matched_by, possible=True),
+                                matched_by + "_possible")
+                continue
+            matched_by = "family+media"
+        else:
+            continue
+        if possible is None:
+            possible = (enrich(entry, matched_by, possible=True),
+                        matched_by + "_possible")
+    if possible:
+        return possible
     return None, ""
 
 
 def append_used_task(path, task, *, attempt_id="", published_at=None,
-                     media_sha256="") -> dict:
-    """Append one successful publish to the ledger with an atomic write."""
+                     media_sha256="", client_version="", matched_by="",
+                     identity_source="") -> dict:
+    """Append one successful publish to the v1 ledger with additive fields."""
     path = Path(path)
     with _UsedTasksLock(path):
         payload = _load_used_tasks(path)
         task = task if isinstance(task, dict) else {}
+        selector = task_selector(task)
+        family = str(task.get("family") or selector.get("family") or "")
+        full_name = normalize_task_name(
+            task.get("task_name_full") or selector.get("full_name"))
+        order_id = _text(task.get("order_id") or selector.get("order_id"))
+        task_name = (_text(task.get("task_name"))
+                     or _text(selector.get("display_name"))
+                     or canonical_task_name(family))
+        source = str(identity_source or "")
+        if not source:
+            source = ("order_id" if normalize_order_id(order_id)
+                      else "full_name" if full_name else "legacy_family")
         entry = {
-            "task_name": _text(task.get("task_name")),
-            "order_id": _text(task.get("order_id")),
+            "task_name": task_name,
+            "order_id": order_id,
             "media_sha256": _text(media_sha256).lower(),
             "published_at": _text(published_at) or datetime.now(
                 timezone.utc).replace(microsecond=0).isoformat().replace(
                     "+00:00", "Z"),
             "attempt_id": _text(attempt_id),
         }
+        entry.update({
+            "task_name_full": full_name or _text(task.get("task_name")),
+            "task_family": family,
+            "identity_source": source,
+            "matched_by": _text(matched_by) or (
+                "order_id+media" if entry["order_id"] else
+                "task_name_full+media" if full_name else "legacy_family+media"),
+            "client_version": _text(client_version),
+        })
         payload["tasks"].append(entry)
         _write_ledger_atomic(path, payload)
         return entry
@@ -478,6 +963,30 @@ XINGTU_VISIBLE_CARD_NAME_JS = r"""
         .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D_]/g, '-')
         .replace(/^任务[:\uff1a]?/, '');
     return text;
+  };
+  const __xingtuCardClassMatches = (el, pattern) => {
+    if (!el || !el.classList || !pattern) return false;
+    let re;
+    try { re = new RegExp(pattern); } catch (err) { return false; }
+    return Array.from(el.classList).some(name => re.test(name));
+  };
+  const __xingtuTaskCard = (el, pattern) => {
+    if (!__xingtuCardClassMatches(el, pattern)) return false;
+    const text = String(el.innerText || el.textContent || '')
+        .replace(/\u200b/g, '').trim();
+    return /^任务[:\uff1a]\s*\S/.test(text);
+  };
+  const __xingtuTaskCards = (root, selector, pattern) => {
+    if (!root || !selector) return [];
+    return Array.from(root.querySelectorAll(selector))
+        .filter(el => __xingtuTaskCard(el, pattern));
+  };
+  const __xingtuClosestTaskCard = (el, pattern) => {
+    for (let node = el; node && node !== document.body;
+         node = node.parentElement) {
+      if (__xingtuTaskCard(node, pattern)) return node;
+    }
+    return null;
   };
   const __xingtuVisible = el => {
     if (!el) return false;
@@ -700,17 +1209,7 @@ XINGTU_VISIBLE_CARD_NAME_JS = r"""
     return __xingtuUnique(out);
   };
   const __xingtuCardOrderIds = card => {
-    const out = __xingtuOrderValuesDeep(card);
-    for (let node = card && card.parentElement;
-         node && node !== document.body;
-         node = node.parentElement) {
-      const own = __xingtuOrderValuesShallow(node);
-      if (own.length) {
-        out.push(...own);
-        break;
-      }
-    }
-    return __xingtuUnique(out);
+    return __xingtuUnique(__xingtuOrderValuesDeep(card));
   };
 """
 
@@ -1042,21 +1541,8 @@ def parse_task_cards(cards, *, task_names=None) -> list:
 
 
 def match_xingtu_task_name(value) -> str:
-    """Map a material file name/path to a task name from the fixed labels.
-
-    The rule is the same one used by the Feishu publishing bot: the first
-    matching label wins, with the more specific ``APP\u79cd\u8349`` checked before the
-    generic ``\u79cd\u8349`` keyword.  An unmatched name returns ``""``; callers must
-    not guess a task.
-    """
-    text = _normal(value).upper()
-    if not text:
-        return ""
-    for label, keywords in XINGTU_TASK_LABELS:
-        for keyword in keywords:
-            if _normal(keyword).upper() in text:
-                return label
-    return ""
+    """Map a material file name/path to its canonical legacy task token."""
+    return canonical_task_name(resolve_task_family(value))
 
 
 def _plan_material_names(plan: dict) -> list:
@@ -1074,54 +1560,166 @@ def _plan_material_names(plan: dict) -> list:
 
 
 def derive_xingtu_task_name(plan: dict) -> str:
-    """Derive one task name from the material file name, or return ``""``.
+    """Never guess a task from the material file name.
 
-    Multiple different labels are ambiguous and therefore not derived: the
-    publish must stay blocked instead of picking one at random.
+    Material names belong to one campaign family in the Huolong workflow.
+    Customers also take tasks from other campaign owners, so a name-derived
+    family token would silently attach the wrong task (or block a valid one).
+    The task must be chosen explicitly by the customer; without one the
+    publish stays blocked.
     """
-    labels = []
-    for name in _plan_material_names(plan):
-        label = match_xingtu_task_name(name)
-        if label and label not in labels:
-            labels.append(label)
-    return labels[0] if len(labels) == 1 else ""
+    return ""
 
 
 def skip_fill_task(plan: dict, mode=None) -> bool:
     """An explicitly empty task name is allowed only for a fill-only run."""
-    task = (plan or {}).get("xingtu_task")
+    plan = plan if isinstance(plan, dict) else {}
+    task = plan.get("xingtu_task")
     return (str(mode or "") == "fill" and isinstance(task, dict)
-            and not normalize_task_name(task.get("task_name")))
+            and not normalize_task_name(task.get("task_name"))
+            and not plan.get("xingtu_task_ref")
+            and not normalize_order_id(task.get("order_id")))
 
 
 def match_picker_rows(rows, task):
-    """Return visible matches in DOM order, preferring order ids over titles."""
-    order_id = str((task or {}).get("order_id") or "").strip()
-    expected = normalize_task_name((task or {}).get("task_name"))
-    visible = [row for row in rows if row.get("visible")]
-    if order_id:
-        exact = []
-        for row in visible:
-            order_ids = list(row.get("order_ids") or [])
-            if (len(order_ids) == 1 and
-                    str(order_ids[0] or "").strip() == order_id):
-                exact.append(row)
-        if exact:
-            return {"rows": exact, "reason": "order_id"}
-    matched = []
-    if expected:
-        for row in visible:
-            titles = [normalize_task_name(value)
-                      for value in (row.get("titles") or [])]
-            if expected not in titles:
-                continue
-            order_ids = list(row.get("order_ids") or [])
-            if order_id and order_ids:
-                if (len(order_ids) != 1 or
-                        str(order_ids[0] or "").strip() != order_id):
-                    continue
-            matched.append(row)
-    return {"rows": matched, "reason": "title"}
+    """Return one structured, fail-closed resolve result.
+
+    ``status=ok`` is the only result a caller may click.  Order ids are exact
+    and never fall back to a title.  Full names are exact.  Family tokens use
+    an exact token/segment pass first, then containment as a compatibility
+    fallback.  Multiple matches are always ``ambiguous``.
+    """
+    task = task if isinstance(task, dict) else {}
+    selector = task_selector(task)
+    visible = [row for row in (rows or []) if isinstance(row, dict)
+               and row.get("visible")]
+
+    def titles(row):
+        values = []
+        for value in (row.get("titles") or []):
+            normalized = normalize_task_name(value)
+            if normalized and normalized not in values:
+                values.append(normalized)
+        name = normalize_task_name(row.get("name"))
+        if name and name not in values:
+            values.insert(0, name)
+        return values
+
+    def candidate(row, *, usable=True):
+        values = titles(row)
+        order_ids = [normalize_order_id(value)
+                     for value in (row.get("order_ids") or []) if value]
+        if not order_ids and row.get("order_id"):
+            order_ids = [normalize_order_id(row.get("order_id"))]
+        return {
+            "task_name": values[0] if values else "",
+            "name": values[0] if values else "",
+            "titles": values,
+            "order_ids": order_ids[:4],
+            "order_id_prefix": (order_ids[0][:10] if len(order_ids) == 1 else ""),
+            "usable": bool(usable),
+        }
+
+    def is_usable(row):
+        text = normalize_task_name(" ".join(
+            titles(row) + [_text(row.get("text"))]))
+        return not any(word in text for word in _UNAVAILABLE_WORDS)
+
+    kind = selector.get("kind")
+    value = selector.get("value")
+    if not kind or not value:
+        return {"status": RESOLVE_NOT_FOUND, "rows": [], "matches": [],
+                "code": "XINGTU_TASK_NOT_FOUND",
+                "candidates": [candidate(row, usable=is_usable(row))
+                               for row in visible[:8]],
+                "reason": "selector_missing", "resolved_identity": None}
+
+    def unique_order_ids(row):
+        order_ids = list(row.get("order_ids") or [])
+        if not order_ids and row.get("order_id"):
+            order_ids = [row.get("order_id")]
+        return [normalize_order_id(item) for item in order_ids if item]
+
+    if kind == "order_id":
+        target = normalize_order_id(value)
+        matches = [row for row in visible if target in unique_order_ids(row)]
+        reason = "order_id"
+    elif kind == "full_name":
+        matches = [row for row in visible if normalize_task_name(value) in titles(row)]
+        reason = "full_name"
+    else:
+        token = normalize_task_name(value)
+        full = normalize_task_name(selector.get("full_name"))
+        exact_full = ([row for row in visible
+                       if full in titles(row)] if full else [])
+        if exact_full:
+            matches = exact_full
+            reason = "full_name_exact"
+        else:
+            token_re = re.compile(r"(?:^|-)%s(?:-|$)" % re.escape(token))
+            exact = [row for row in visible
+                     if any(normalize_task_name(item) == token or
+                            token_re.search(normalize_task_name(item))
+                            for item in titles(row))]
+            matches = exact or [row for row in visible
+                                if any(token in normalize_task_name(item)
+                                       for item in titles(row))]
+            reason = "family_token_exact" if exact else "family_token_contained"
+
+    if not matches:
+        return {"status": RESOLVE_NOT_FOUND, "rows": [], "matches": [],
+                "code": "XINGTU_TASK_NOT_FOUND",
+                "candidates": [candidate(row, usable=is_usable(row))
+                               for row in visible[:8]],
+                "reason": "no_visible_match", "resolved_identity": None}
+
+    usable = [row for row in matches if is_usable(row)]
+    if not usable:
+        return {"status": RESOLVE_UNAVAILABLE, "rows": [], "matches": matches,
+                "code": "XINGTU_TASK_UNAVAILABLE",
+                "candidates": [candidate(row, usable=False) for row in matches[:8]],
+                "reason": "only_unavailable", "resolved_identity": None}
+
+    multi_order = [row for row in usable if len(unique_order_ids(row)) > 1]
+    if multi_order or len(usable) > 1:
+        return {"status": RESOLVE_AMBIGUOUS, "rows": [], "matches": usable,
+                "code": "XINGTU_TASK_AMBIGUOUS",
+                "candidates": [candidate(row, usable=True) for row in usable[:8]],
+                "reason": "multiple_order_ids" if multi_order else "multiple_matches",
+                "resolved_identity": None}
+
+    row = usable[0]
+    order_ids = unique_order_ids(row)
+    full_name = (titles(row)[0] if titles(row) else "")
+    identity = ({"kind": "order_id", "value": order_ids[0],
+                 "display_name": full_name or order_ids[0]}
+                if order_ids else
+                {"kind": "full_name", "value": full_name,
+                 "display_name": full_name})
+    return {"status": RESOLVE_OK, "rows": [row], "matches": [row],
+            "code": "OK", "candidates": [candidate(row, usable=True)],
+            "reason": reason, "resolved_identity": identity}
+
+
+def raise_match_error(outcome, task=None):
+    """Raise the typed error represented by a non-ok resolver outcome."""
+    outcome = outcome if isinstance(outcome, dict) else {}
+    if outcome.get("status") == RESOLVE_OK:
+        return
+    details = {
+        "task_name": _text((task or {}).get("task_name")),
+        "task_name_full": _text((task or {}).get("task_name_full")),
+        "candidates": list(outcome.get("candidates") or [])[:8],
+        "reason": _text(outcome.get("reason")),
+    }
+    code = str(outcome.get("code") or "XINGTU_TASK_NOT_FOUND")
+    cls = {
+        "XINGTU_TASK_NOT_FOUND": XingtuTaskNotFound,
+        "XINGTU_TASK_AMBIGUOUS": XingtuTaskAmbiguous,
+        "XINGTU_TASK_UNAVAILABLE": XingtuTaskUnavailable,
+        "XINGTU_TASK_CHANGED": XingtuTaskChanged,
+    }.get(code, XingtuTaskNotFound)
+    raise cls(render_error_message(code, details), code=code, details=details)
 
 
 def click_picker_element(item) -> bool:
@@ -1131,6 +1729,17 @@ def click_picker_element(item) -> bool:
             return False
         if item.get_attribute("aria-disabled") == "true":
             return False
+        # A trusted mouse click is required for a label's default activation
+        # to run.  ``dispatch_event("click")`` is untrusted: React handlers
+        # fire but the wrapped semi-radio input never becomes checked, which
+        # surfaced as "star task card did not become selected" while the card
+        # was visibly present.  Keep dispatch_event only as a fallback for
+        # elements the mouse cannot reach.
+        try:
+            item.click(timeout=2000)
+            return True
+        except Exception:
+            pass
         try:
             item.dispatch_event("click", timeout=2000)
         except TypeError:
@@ -1161,54 +1770,137 @@ def task_from_plan(plan: dict, *, mode=None) -> dict:
     if skip_fill_task(plan, mode):
         return {}
     explicit = (str(plan.get("publish_mode") or "") == "xingtu"
-                or "xingtu_task" in plan or "xingtu" in plan)
-    task = plan.get("xingtu_task") or plan.get("xingtu")
-    if isinstance(task, dict):
-        cleaned = {key: _text(task.get(key)) for key in
-                   ("order_id", "task_name", "demander", "task_type",
-                    "remaining_quota", "task_id", "upload_url")}
-        cleaned["mode"] = "xingtu"
-        if not cleaned.get("order_id"):
-            cleaned["order_id"] = _text(plan.get("order_id"))
-        if not cleaned.get("task_name"):
-            cleaned["task_name"] = _text(plan.get("xingtu_task_name"))
-        if not cleaned.get("task_name"):
-            derived = derive_xingtu_task_name(plan)
-            if derived:
-                cleaned["task_name"] = derived
-                cleaned["name_source"] = "material"
-        if cleaned.get("order_id") or cleaned.get("task_name"):
-            return cleaned
-        if explicit:
-            raise XingtuTaskNotAttached(
-                "xingtu publish plan has neither order_id nor task_name; "
-                "refusing normal publish")
-        return {}
-    order_id = _text(plan.get("order_id"))
-    task_name = _text(plan.get("xingtu_task_name"))
+                or "xingtu_task" in plan or "xingtu_task_ref" in plan
+                or "xingtu" in plan)
+    raw_task = plan.get("xingtu_task") or plan.get("xingtu")
+    if not isinstance(raw_task, dict):
+        raw_task = {}
+
+    warnings = []
+    ref = plan.get("xingtu_task_ref")
+    if ref is not None:
+        parsed = parse_task_ref(ref)
+        family = parsed["family"]
+        kind = parsed["match"]["kind"]
+        value = parsed["match"]["value"]
+        token = canonical_task_name(family)
+        legacy_name = normalize_task_name(raw_task.get("task_name"))
+        if legacy_name:
+            legacy_family = resolve_task_family(legacy_name)
+            if legacy_family and legacy_family != family:
+                raise XingtuPlanSchemaInvalid(
+                    "legacy task_name conflicts with xingtu_task_ref",
+                    details={"legacy_task_name": legacy_name,
+                             "task_ref_family": family})
+            if legacy_name not in (token, value) and token not in legacy_name:
+                warnings.append("legacy_task_name_not_canonical")
+        display = parsed.get("display_name") or token
+        order_id = value if kind == "order_id" else ""
+        full_name = value if kind == "full_name" else ""
+        task_name = token if kind == "family_token" else (full_name or display or token)
+        cleaned = {
+            "order_id": order_id,
+            "task_name": task_name,
+            "task_name_full": full_name,
+            "family": family,
+            "task_ref": parsed,
+            "selector_kind": kind,
+            "demander": _text(raw_task.get("demander")),
+            "task_type": _text(raw_task.get("task_type")),
+            "remaining_quota": _text(raw_task.get("remaining_quota")),
+            "task_id": _text(raw_task.get("task_id")),
+            "upload_url": _text(raw_task.get("upload_url")),
+            "mode": "xingtu",
+            "warnings": warnings,
+        }
+        return cleaned
+
+    order_id = normalize_order_id(
+        raw_task.get("order_id") or plan.get("order_id"))
+    task_name = normalize_task_name(
+        raw_task.get("task_name") or plan.get("xingtu_task_name"))
+    full_name = normalize_task_name(
+        raw_task.get("task_name_full") or plan.get("xingtu_task_full_name"))
     derived_name = ""
-    if not task_name:
+    if not task_name and not full_name and not order_id:
         derived_name = derive_xingtu_task_name(plan)
         if derived_name:
             task_name = derived_name
-    if (order_id or task_name) and str(plan.get("publish_mode") or "") == "xingtu":
-        result = {"order_id": order_id, "task_name": task_name,
-                  "demander": "", "task_type": "", "remaining_quota": "",
-                  "task_id": "", "upload_url": "", "mode": "xingtu"}
-        if derived_name:
-            result["name_source"] = "material"
-        return result
-    if explicit and not order_id and not task_name:
-        derived = derive_xingtu_task_name(plan)
-        if derived:
-            return {"order_id": "", "task_name": derived, "demander": "",
-                    "task_type": "", "remaining_quota": "", "task_id": "",
-                    "upload_url": "", "mode": "xingtu",
-                    "name_source": "material"}
-        raise XingtuTaskNotAttached(
+    family = (resolve_task_family(full_name, full_name=True)
+              if full_name else resolve_task_family(task_name))
+    token = canonical_task_name(family)
+    # Any Xingtu task the customer actually holds is valid.  Task family
+    # (免费/激励/种草/剧集) is legacy metadata for the Huolong workflow only;
+    # it must never gate a publish, because customers also take tasks from
+    # other campaign owners.  Identity comes from order_id first, then the
+    # exact task name shown in the picker.
+    if (task_name or full_name) and not family:
+        warnings.append("unknown_task_family")
+    if order_id or task_name or full_name:
+        selector_kind = ("order_id" if order_id else
+                         "full_name" if full_name else
+                         "family_token" if family else "task_name")
+        return {
+            "order_id": order_id,
+            "task_name": task_name or full_name or token,
+            "task_name_full": full_name,
+            "family": family,
+            "selector_kind": selector_kind,
+            "demander": _text(raw_task.get("demander")),
+            "task_type": _text(raw_task.get("task_type")),
+            "remaining_quota": _text(raw_task.get("remaining_quota")),
+            "task_id": _text(raw_task.get("task_id")),
+            "upload_url": _text(raw_task.get("upload_url")),
+            "mode": "xingtu",
+            "warnings": warnings,
+            **({"name_source": "material"} if derived_name else {}),
+        }
+    if explicit:
+        raise XingtuPlanSchemaInvalid(
             "xingtu publish plan has neither order_id nor task_name; "
             "refusing normal publish")
     return {}
+
+
+def validate_plan_contract(plan, *, mode=None, ledger_path=None) -> dict:
+    """Static, browser-free plan validation used by dry-run and tests."""
+    problems = []
+    task = {}
+    try:
+        task = task_from_plan(plan, mode=mode)
+        ref = (plan or {}).get("xingtu_task_ref") if isinstance(plan, dict) else None
+        legacy = ((plan or {}).get("xingtu_task") or {}) if isinstance(plan, dict) else {}
+        if isinstance(ref, dict) and isinstance(legacy, dict):
+            parsed = parse_task_ref(ref)
+            legacy_name = normalize_task_name(legacy.get("task_name"))
+            legacy_family = resolve_task_family(legacy_name)
+            if legacy_family and legacy_family != parsed["family"]:
+                problems.append({
+                    "code": "XINGTU_PLAN_SCHEMA_INVALID",
+                    "message": render_error_message("XINGTU_PLAN_SCHEMA_INVALID"),
+                    "failure_scope": "batch",
+                    "action": "regenerate_plan",
+                })
+    except XingtuError as exc:
+        problems.append({
+            "code": getattr(exc, "code", "XINGTU_PLAN_SCHEMA_INVALID"),
+            "message": render_error_message(
+                getattr(exc, "code", "XINGTU_PLAN_SCHEMA_INVALID"),
+                getattr(exc, "details", {})),
+            "failure_scope": getattr(exc, "failure_scope", "batch"),
+            "action": getattr(exc, "action", "regenerate_plan"),
+        })
+    if task and ledger_path is not None and str(mode or "") != "fill":
+        try:
+            load_used_tasks(ledger_path)
+        except XingtuDedupLedgerError as exc:
+            problems.append({
+                "code": exc.code,
+                "message": render_error_message(exc.code),
+                "failure_scope": "client",
+                "action": "contact_admin",
+            })
+    return {"ok": not problems, "problems": problems, "task": task}
 
 
 def xingtu_upload_url(task: dict) -> str:
@@ -1465,6 +2157,128 @@ _JS_CLICK_ROW_DETAIL = r"""(index) => {
   el.click();
   return true;
 }"""
+
+
+
+_JS_PICKER_LEAF = r"""(root, texts) => {
+  const scope = (root && root.ownerDocument) || document;
+  const clean = value => String(value || '').replace(/\u200b/g, '').replace(/\s+/g, '');
+  const targets = (texts || []).map(clean);
+  const visible = el => {
+    try {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' ||
+          Number(style.opacity || 1) === 0) return false;
+    } catch (err) { return false; }
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  };
+  const wanted = el => {
+    const text = clean(el.innerText);
+    if (!text || targets.indexOf(text) < 0) return false;
+    for (const child of el.children) {
+      if (clean(child.innerText) === text) return false;
+    }
+    return true;
+  };
+  const hits = Array.from(scope.querySelectorAll('span,div,p,a,button'))
+      .filter(el => visible(el) && wanted(el));
+  if (!hits.length) return null;
+  hits.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+  return hits[0];
+}"""
+
+
+_JS_PICKER_OPEN_MODAL = r"""() => {
+  const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  return Array.from(document.querySelectorAll('div.semi-portal')).some(
+      el => visible(el) && (el.innerText || '').includes('星图任务'));
+}"""
+
+
+_JS_PICKER_CARDS = r"""() => {
+  const clean = s => String(s || '').replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
+  const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  const textOf = el => String((el && (el.innerText || el.textContent)) || '');
+  const portals = Array.from(document.querySelectorAll('div.semi-portal'))
+      .filter(el => visible(el) && textOf(el).includes('星图任务'));
+  const roots = portals.filter(el => !portals.some(other => other !== el && other.contains(el)));
+  if (roots.length !== 1) return [];
+  const scope = roots[0];
+  const cards = Array.from(scope.querySelectorAll('div[class*="card-container-"]'))
+      .filter(el => visible(el) && !/creator-layout/.test(String(el.className || '')));
+  return cards.map((el, index) => {
+    el.setAttribute('data-winport-pick-card', String(index));
+    const lines = String(el.innerText || el.textContent || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+    const nameEl = el.querySelector('[class*="task-name"]');
+    let name = clean(nameEl ? (nameEl.innerText || nameEl.textContent || '') : '');
+    if (!name) {
+      for (const line of lines) {
+        const m = line.match(/^任务[:：]\s*(.+)$/);
+        if (m) { name = clean(m[1]); break; }
+      }
+    }
+    return {index: index, name: name, lines: lines};
+  });
+}"""
+
+
+_PICKER_OPEN_TEXTS = ("请选择星图任务", "选择星图任务")
+
+
+def _picker_control(page, timeout_ms=20000):
+    """Return the real (trusted-clickable) placeholder element, or None."""
+    deadline = time.time() + max(1.0, float(timeout_ms) / 1000.0)
+    while time.time() < deadline:
+        try:
+            handle = page.locator("body").evaluate_handle(
+                _JS_PICKER_LEAF, list(_PICKER_OPEN_TEXTS))
+            element = handle.as_element() if handle is not None else None
+            if element is not None:
+                return element
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            time.sleep(0.5)
+    return None
+
+
+def _picker_modal_open(page):
+    try:
+        return bool(page.evaluate(_JS_PICKER_OPEN_MODAL))
+    except Exception:
+        return False
+
+
+def _open_picker(page, timeout_ms=20000):
+    """Open the star-task picker with a trusted click on the real leaf label.
+
+    A coordinate click on the surrounding row does nothing: the only element
+    that opens the picker is the exact text leaf (``span.desc-*``).  This is
+    the same click the publish flow uses, so listing tasks cannot drift away
+    from the path that actually attaches a task.
+    """
+    element = _picker_control(page, timeout_ms)
+    if element is None:
+        return False
+    for attempt in range(3):
+        try:
+            element.click(timeout=2500)
+        except Exception:
+            try:
+                element.dispatch_event("click")
+            except Exception:
+                pass
+        for _ in range(6):
+            if _picker_modal_open(page):
+                return True
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        element = _picker_control(page, 3000) or element
+    return False
 
 
 def _context_page(context):
@@ -1765,6 +2579,126 @@ def _detail_from_row(context, page, task, *, timeout_ms: int = 12000) -> dict:
                 pass
 
 
+
+def _parse_picker_card(row):
+    """Turn one live picker card into the menu task shape."""
+    row = row if isinstance(row, dict) else {}
+    lines = [_text(line) for line in (row.get("lines") or []) if _text(line)]
+    task_name = _text(row.get("name"))
+    demander = ""
+    task_type = ""
+    for line in lines:
+        if not task_name and re.match(r"^\u4efb\u52a1[:\uff1a]", line):
+            task_name = re.sub(r"^\u4efb\u52a1[:\uff1a]\s*", "", line).strip()
+        elif not demander and re.match(r"^(?:\u5ba2\u6237|\u9700\u6c42\u65b9)[:\uff1a]", line):
+            demander = re.sub(r"^(?:\u5ba2\u6237|\u9700\u6c42\u65b9)[:\uff1a]\s*", "", line).strip()
+    if task_name and len(lines) > 1:
+        for line in lines[1:4]:
+            if line and not re.match(r"^(?:\u5ba2\u6237|\u9700\u6c42\u65b9|\u5956\u91d1|\u843d\u5730\u9875)[:\uff1a]", line):
+                task_type = line
+                break
+    return {
+        "task_name": task_name,
+        "order_id": "",
+        "demander": demander,
+        "task_type": task_type,
+        "remaining_quota": "",
+        "source": "publish_picker",
+    }
+
+
+def _picker_tasks_once(context, opener, *, max_tasks=20, timeout_ms=30000):
+    """One attempt: open the publish-page picker and read its cards."""
+    page = context.new_page()
+    try:
+        page.goto(DOUYIN_PUBLISH_URL, wait_until="domcontentloaded",
+                  timeout=max(20000, int(timeout_ms)))
+        # The form paints ~10s after first load, so wait for the real label
+        # before clicking; the publish-path opener clicks immediately and is
+        # only safe once the page is already warm.
+        opened = _open_picker(page, timeout_ms)
+        if not opened:
+            # One reload: the form sometimes paints after a slow first load.
+            try:
+                page.reload(wait_until="domcontentloaded",
+                            timeout=max(20000, int(timeout_ms)))
+                opened = _open_picker(page, timeout_ms)
+            except Exception:
+                opened = False
+        if not opened:
+            text = _page_text(page)
+            if _looks_like_login(page, text):
+                raise XingtuNotSignedIn(
+                    "douyin creator page is not signed in; sign in, then retry")
+            raise XingtuTaskUnavailable(
+                "star task picker control was not found on the publish page"
+                " (url=%s, chars=%d)"
+                % (_text(getattr(page, "url", ""))[:80], len(text or "")))
+        rows = []
+        for _ in range(16):
+            try:
+                if opener is not None:
+                    rows = opener._xingtu_card_rows(page) or []
+                else:
+                    rows = page.evaluate(_JS_PICKER_CARDS) or []
+            except Exception:
+                rows = []
+            if rows:
+                break
+            page.wait_for_timeout(500)
+        tasks = []
+        seen = set()
+        for row in rows[:max(1, int(max_tasks))]:
+            task = _parse_picker_card(row)
+            name = normalize_task_name(task.get("task_name"))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            tasks.append(task)
+        if not tasks:
+            raise XingtuTaskListEmpty(
+                "the publish-page star task picker has no writable task")
+        return tasks
+    finally:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def list_picker_tasks(context, *, max_tasks=20, timeout_ms=30000):
+    """List the tasks the publish page itself offers (no Xingtu login needed).
+
+    The Douyin publish page shows the account's real, currently writable star
+    tasks.  Reading that picker is the same source the publish flow uses, so a
+    task listed here is a task that can actually be attached.  Nothing is
+    selected and the picker is closed afterwards.
+
+    A cold or throttled creator page occasionally paints an empty shell; one
+    fresh-page retry keeps a slow paint from being reported as "no task".
+    """
+    opener = None
+    try:
+        from . import publish_exec as _pe  # proven publish-path helpers
+        opener = _pe
+    except Exception:
+        opener = None
+    last = None
+    for _ in range(2):
+        try:
+            return _picker_tasks_once(context, opener, max_tasks=max_tasks,
+                                      timeout_ms=timeout_ms)
+        except XingtuNotSignedIn:
+            raise
+        except (XingtuTaskUnavailable, XingtuTaskListEmpty) as exc:
+            last = exc
+    raise last
+
+
 def _final_task_list(tasks, unresolved: int) -> list:
     # A single malformed row must not hide every other writable task.  At the
     # same time a list with no attributable order id is an error, never a
@@ -1789,7 +2723,22 @@ def _final_task_list(tasks, unresolved: int) -> list:
 
 def list_available_tasks(context, *, max_tasks: int = 20,
                          resolve_entries: bool = True) -> list:
-    """Read the live Xingtu task list.  Raises instead of guessing."""
+    """Read the live task list, falling back to the publish-page picker.
+
+    The Xingtu backend needs its own login.  The Douyin publish page shows the
+    same writable tasks for the signed-in account, so it is the reliable source
+    for "what can I publish right now".  Both paths fail closed.
+    """
+    try:
+        return _list_backend_tasks(context, max_tasks=max_tasks,
+                                   resolve_entries=resolve_entries)
+    except (XingtuNotSignedIn, XingtuTaskListEmpty, XingtuTaskUnavailable):
+        return list_picker_tasks(context, max_tasks=max_tasks)
+
+
+def _list_backend_tasks(context, *, max_tasks: int = 20,
+                        resolve_entries: bool = True) -> list:
+    """Read the live Xingtu backend task list.  Raises instead of guessing."""
     page = _context_page(context)
     close_page = page not in (getattr(context, "pages", None) or [])
     try:

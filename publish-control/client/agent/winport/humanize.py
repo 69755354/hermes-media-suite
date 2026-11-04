@@ -133,7 +133,8 @@ def load_pace_profiles(path) -> dict:
 
 def get_pace_profile(layout, env_id: str) -> PaceProfile:
     """Load, or deterministically create, a persistent pace profile for one env."""
-    path = Path(getattr(layout, "config", layout.data / "config")) / PROFILE_PATH
+    from .customer_paths import layout_dir
+    path = layout_dir(layout, "config", "config") / PROFILE_PATH
     profiles = load_pace_profiles(path)
     key = str(env_id or "default")
     if key in profiles and isinstance(profiles[key], dict):

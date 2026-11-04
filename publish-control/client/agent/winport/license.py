@@ -11,8 +11,13 @@ instance (hard constraint, background.md section 3).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import base64
 import json
+import logging
 import math
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +33,7 @@ STATUS_BAD_SCHEMA = "SCHEMA_INVALID"
 STATUS_CRYPTO_UNAVAILABLE = "CRYPTO_UNAVAILABLE"
 STATUS_WEAK_FINGERPRINT = "WEAK_FINGERPRINT"
 STATUS_CLOCK_ROLLBACK = "CLOCK_ROLLBACK"
+STATUS_SEAT_DENIED = "SEAT_DENIED"
 
 #: Explicit clock-state verdicts (1.2.8, GPT_REVIEW_1.2.7 必修 1).  The guard
 #: used to answer only with a bool, so a caller could not tell "the clock is
@@ -550,11 +556,14 @@ def publish_gate(license_obj, public_key: bytes, machine_id: str, *,
     if account_id:
         seat = account_authorization(license_obj, account_id, now=now)
     allowed = result["status"] not in PUBLISH_BLOCKING
+    status = result["status"]
     reasons = []
     if not allowed:
         reasons.append(f"授权状态 {result['status']}：{result.get('reason', '')}")
     if seat is not None and not seat.get("enabled", True):
         allowed = False
+        if status in (STATUS_OK, STATUS_GRACE):
+            status = STATUS_SEAT_DENIED
         reasons.append(seat.get("reason", "该号未授权或已停用"))
     if clock_rollback:
         allowed = False
@@ -563,7 +572,8 @@ def publish_gate(license_obj, public_key: bytes, machine_id: str, *,
     return {
         "publish_allowed": bool(allowed),
         "collect_allowed": True,
-        "status": result["status"],
+        "status": status,
+        "license_status": result["status"],
         "days_left": notice.get("days_left"),
         "level": notice.get("level"),
         "notices": notice.get("notices", []),
@@ -579,48 +589,553 @@ def publish_gate(license_obj, public_key: bytes, machine_id: str, *,
 # 正式授权导入后以 license.json 为准（status=OK），试用文件不再生效。
 # ---------------------------------------------------------------------------
 TRIAL_DAYS = 14
+TRIAL_REG_KEY = r"Software\HuolongAgent\Agent"
+_TRIAL_VERSION = 2
+_TRIAL_RECORD_VALUE = "TrialRecord"
+_TRIAL_SEEN_VALUE = "TrialSeen"
 
 
-def trial_state(layout, now=None):
-    from datetime import datetime, timedelta, timezone
+def _utc(value=None):
+    value = value or datetime.now(timezone.utc)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _trial_path(layout):
     from pathlib import Path
-    import json as _json
+    from .customer_paths import layout_dir
+    root = layout_dir(layout, "system")
+    return root / "trial.json"
+
+
+def _trial_user():
+    """Stable user identity for the portable (non-Windows test) fallback."""
+    if os.name == "nt":
+        domain = str(os.environ.get("USERDOMAIN") or "").strip()
+        user = str(os.environ.get("USERNAME") or "").strip()
+        return (domain + "\\" + user) if domain else (user or "windows-user")
+    try:
+        return "uid:%s" % os.getuid()
+    except (AttributeError, OSError):
+        return "user:unknown"
+
+
+def _dpapi_protect(raw: bytes) -> bytes:
+    """Encrypt with DPAPI user scope: another Windows user/machine cannot read it."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    source = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    in_blob = DATA_BLOB(len(raw), source)
+    out_blob = DATA_BLOB()
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(DATA_BLOB), ctypes.c_wchar_p,
+        ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    if not crypt32.CryptProtectData(
+            ctypes.byref(in_blob), "manju-trial-record-v2", None, None, None,
+            0, ctypes.byref(out_blob)):
+        raise OSError(ctypes.get_last_error(),
+                      "CryptProtectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
+def _dpapi_unprotect(raw: bytes) -> bytes:
+    """Decrypt a DPAPI-user record; failure is corruption, never a reset."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    source = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
+    in_blob = DATA_BLOB(len(raw), source)
+    out_blob = DATA_BLOB()
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DATA_BLOB), ctypes.POINTER(ctypes.c_wchar_p),
+        ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    if not crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob), None, None, None, None, 0,
+            ctypes.byref(out_blob)):
+        raise OSError(ctypes.get_last_error(),
+                      "CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(ctypes.cast(out_blob.pbData, ctypes.c_void_p))
+
+
+def _portable_check(raw: bytes, machine_id: str, user: str) -> str:
+    """Corruption check for Linux tests; Windows always uses DPAPI above."""
+    material = (raw + b"|" + machine_id.encode("utf-8") + b"|" +
+                user.encode("utf-8"))
+    return hashlib.sha256(material).hexdigest()
+
+
+def _trial_container(record):
+    raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if os.name == "nt":
+        protection = "dpapi-user"
+        payload = _dpapi_protect(raw)
+        check = ""
+    else:
+        protection = "portable-user"
+        payload = raw
+        check = _portable_check(payload, str(record.get("machine") or ""),
+                                str(record.get("user") or ""))
+    return {"version": _TRIAL_VERSION, "protection": protection,
+            "payload": base64.b64encode(payload).decode("ascii"),
+            "check": check}
+
+
+def _open_trial_container(container, machine_id, user):
+    if not isinstance(container, dict):
+        return None
+    if container.get("version") != _TRIAL_VERSION:
+        return None
+    protection = container.get("protection")
+    try:
+        payload = base64.b64decode(str(container.get("payload") or ""),
+                                   validate=True)
+    except (ValueError, TypeError):
+        return None
+    if protection == "dpapi-user":
+        if os.name != "nt":
+            return None
+        try:
+            raw = _dpapi_unprotect(payload)
+        except OSError:
+            return None
+    elif protection == "portable-user":
+        # The portable form is a public SHA256, not a trusted seal.  It exists
+        # only for the Linux test/graceful-degradation path; a Windows reader
+        # must never accept it, otherwise a user can mint a fresh trial start
+        # without touching DPAPI.  Windows is fail-closed even when the record
+        # claims the Windows platform.
+        if os.name == "nt":
+            logging.getLogger(__name__).warning(
+                "trial record refused: portable-user protection on Windows")
+            return None
+        if not hmac.compare_digest(
+                str(container.get("check") or ""),
+                _portable_check(payload, machine_id, user)):
+            return None
+        raw = payload
+    else:
+        return None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("machine") != machine_id or record.get("user") != user:
+        return None
+    if type(record.get("days")) is not int or record["days"] != TRIAL_DAYS:
+        return None
+    if not isinstance(record.get("license_seen"), bool):
+        return None
+    if not isinstance(record.get("issued"), str) or not record["issued"].strip():
+        return None
+    return record
+
+
+def _trial_record(machine_id, issued, license_seen=False):
+    record = {"schema": _TRIAL_VERSION, "machine": machine_id,
+              "user": _trial_user(), "issued": issued,
+              "days": TRIAL_DAYS, "license_seen": bool(license_seen),
+              "platform": os.name}
+    return record
+
+
+def _parse_trial_record(record, machine_id, now):
+    if not isinstance(record, dict):
+        return None
+    if record.get("schema") != _TRIAL_VERSION:
+        return None
+    # A record that explicitly claims another platform was copied or forged.
+    # Older v2 records have no platform field; missing is not a mismatch, but
+    # any present and different value is refused and logged.
+    claimed_platform = record.get("platform")
+    if claimed_platform is not None and claimed_platform != os.name:
+        logging.getLogger(__name__).warning(
+            "trial record refused: platform %r does not match %r",
+            claimed_platform, os.name)
+        return None
+    if record.get("machine") != machine_id or record.get("user") != _trial_user():
+        return None
+    if type(record.get("days")) is not int or record["days"] != TRIAL_DAYS:
+        return None
+    if not isinstance(record.get("license_seen"), bool):
+        return None
+    if not isinstance(record.get("issued"), str) or not record["issued"].strip():
+        return None
+    try:
+        issued = parse_time(record["issued"])
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if issued > now + timedelta(minutes=5):
+        return None
+    return dict(record)
+
+
+def _read_trial_registry():
+    if os.name != "nt":
+        return None
+    logger = logging.getLogger(__name__)
+    try:
+        import winreg
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, TRIAL_REG_KEY)
+        except FileNotFoundError:
+            return None
+        with key:
+            values = {}
+            types = {}
+            errors = {}
+            for name in (_TRIAL_RECORD_VALUE, _TRIAL_SEEN_VALUE):
+                try:
+                    values[name], types[name] = winreg.QueryValueEx(key, name)
+                except FileNotFoundError:
+                    errors[name] = "value_missing"
+                except OSError as exc:
+                    errors[name] = "query_error: %s" % exc
+    except ImportError as exc:
+        logger.warning("trial registry unavailable: %s", exc)
+        return {"error": "winreg unavailable: %s" % exc}
+    except OSError as exc:
+        logger.warning("trial registry key query failed: %s", exc)
+        return {"error": "key_query_error: %s" % exc}
+    raw = values.get(_TRIAL_RECORD_VALUE)
+    seen = values.get(_TRIAL_SEEN_VALUE)
+    state = errors.get(_TRIAL_RECORD_VALUE, "valid")
+    if not errors and (types.get(_TRIAL_RECORD_VALUE) != winreg.REG_SZ or
+                       types.get(_TRIAL_SEEN_VALUE) != winreg.REG_SZ):
+        state = "invalid_type"
+    if state == "valid" and (not isinstance(raw, str) or not raw.strip()):
+        state = "empty"
+    container = None
+    if state == "valid":
+        try:
+            container = json.loads(raw)
+        except (TypeError, ValueError):
+            state = "invalid_json"
+        if not isinstance(container, dict):
+            state = "invalid_container"
+    corrupt = bool(errors or state != "valid" or seen not in ("0", "1"))
+    if corrupt:
+        seen_state = errors.get(
+            _TRIAL_SEEN_VALUE,
+            "empty_or_invalid" if seen not in ("0", "1") else "valid")
+        logger.warning(
+            "trial registry is untrusted: record=%s seen=%s value_errors=%s",
+            state, seen_state, errors)
+    return {"container": container, "seen": seen == "1", "present": True,
+            "raw_present": raw is not None, "corrupt": corrupt,
+            "state": state, "value_errors": errors}
+
+
+def _write_trial_registry(record):
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+
+        with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, TRIAL_REG_KEY, 0,
+                winreg.KEY_SET_VALUE) as key:
+            payload = json.dumps(_trial_container(record), sort_keys=True,
+                                 separators=(",", ":"))
+            winreg.SetValueEx(key, _TRIAL_RECORD_VALUE, 0, winreg.REG_SZ, payload)
+            winreg.SetValueEx(key, _TRIAL_SEEN_VALUE, 0, winreg.REG_SZ,
+                              "1" if record.get("license_seen") is True else "0")
+    except ImportError as exc:
+        raise OSError("winreg unavailable on Windows: %s" % exc) from exc
+
+
+def _write_trial_file(layout, record):
+    path = _trial_path(layout)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(_trial_container(record), ensure_ascii=False),
+        encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _write_trial_record(layout, record):
+    """Write the record to both stores; tombstone writes registry first."""
+    if record.get("license_seen") is True:
+        registry_error = None
+        try:
+            _write_trial_registry(record)
+        except OSError as exc:
+            registry_error = exc
+        try:
+            _write_trial_file(layout, record)
+        except OSError as exc:
+            if registry_error is not None:
+                raise OSError("registry tombstone failed (%s); file tombstone "
+                              "failed (%s)" % (registry_error, exc)) from exc
+            raise
+        if registry_error is not None:
+            raise registry_error
+        return
+    _write_trial_file(layout, record)
+    try:
+        _write_trial_registry(record)
+    except OSError:
+        try:
+            _trial_path(layout).unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _same_trial_record(left, right):
+    fields = ("schema", "machine", "user", "issued", "days", "license_seen",
+              "platform")
+    return all(left.get(field) == right.get(field) for field in fields)
+
+
+def _collect_trial_records(layout, machine_id, now):
+    """Read BOTH stores, with the registry tombstone authoritative."""
+    registry = _read_trial_registry()
+    registry_error = bool(isinstance(registry, dict) and registry.get("error"))
+    registry_present = bool(registry is not None and not registry_error)
+    registry_seen = bool(registry and registry.get("seen"))
+    registry_record = None
+    # A key that exists but whose value cannot be parsed is "already used or
+    # damaged", never "absent": otherwise a corrupted HKCU value plus a valid
+    # file record re-opens the one-time trial.
+    registry_corrupt = bool(registry_present and registry.get("corrupt"))
+    if (registry_present and registry.get("raw_present")
+            and registry.get("container") is None):
+        registry_corrupt = True
+    if registry_present and registry.get("container") is not None:
+        opened = _open_trial_container(registry["container"], machine_id,
+                                       _trial_user())
+        registry_record = _parse_trial_record(opened, machine_id, now)
+        registry_corrupt = registry_corrupt or registry_record is None
+
+    path = _trial_path(layout)
+    file_record = None
+    file_corrupt = False
+    try:
+        path.stat()
+        file_present = True
+    except FileNotFoundError:
+        file_present = False
+    except OSError:
+        file_present = True
+        file_corrupt = True
+    if file_present:
+        try:
+            container = json.loads(path.read_text(encoding="utf-8-sig"))
+            opened = _open_trial_container(container, machine_id, _trial_user())
+            file_record = _parse_trial_record(opened, machine_id, now)
+            file_corrupt = file_record is None
+        except (OSError, UnicodeError, ValueError):
+            file_corrupt = True
+
+    tombstone = bool(registry_seen or (file_record and file_record.get(
+        "license_seen") is True) or (registry_record and registry_record.get(
+            "license_seen") is True))
+    conflict = False
+    if file_record is not None and registry_record is not None:
+        if not _same_trial_record(file_record, registry_record):
+            conflict = True
+    if registry_seen and file_record is not None and \
+            file_record.get("license_seen") is not True:
+        conflict = True
+    if registry_present and not registry_seen and file_record is not None and \
+            file_record.get("license_seen") is True:
+        conflict = True
+
+    record = registry_record or file_record
+    if tombstone and file_record is not None and file_record.get(
+            "license_seen") is True:
+        record = file_record
+    corrupt = bool(registry_error or registry_corrupt or file_corrupt)
+    blocked = bool(tombstone or conflict or corrupt)
+    if tombstone:
+        source = "tombstone"
+    elif conflict:
+        source = "conflict"
+    elif record is not None:
+        source = ("both" if registry_record is not None and
+                  file_record is not None else
+                  "registry" if registry_record is not None else "file")
+    elif corrupt or registry_present or file_present:
+        source = "corrupt"
+    else:
+        source = "missing"
+    return {"record": record, "source": source, "blocked": blocked,
+            "tombstone": tombstone, "conflict": conflict,
+            "corrupt": corrupt, "registry_error": registry_error}
+
+
+def _read_trial_record(layout, machine_id, now):
+    state = _collect_trial_records(layout, machine_id, now)
+    return state["record"], state["source"]
+
+
+def initialize_trial(layout, now=None, *, allow_create=True,
+                     fingerprint_info=None):
+    """Create the install-time trial once; never restart it after loss."""
+    from pathlib import Path
     from .fingerprint import fingerprint
 
+    now = _utc(now)
+    fp = fingerprint_info or fingerprint()
+    machine_id = str(fp.get("machine_id") or "")
+    if not machine_id or fp.get("weak"):
+        return {"created": False,
+                "reason": "machine fingerprint is weak; trial not issued"}
+    if Path(layout.license_file).exists():
+        try:
+            mark_trial_license_seen(layout, now=now, fingerprint_info=fp)
+        except OSError as exc:
+            return {"created": False,
+                    "reason": "formal licence present, but trial tombstone "
+                              "could not be written: %s" % exc}
+        return {"created": False, "reason": "formal licence present; trial disabled"}
+    state = _collect_trial_records(layout, machine_id, now)
+    record, source = state["record"], state["source"]
+    if state["blocked"]:
+        return {"created": False,
+                "reason": "trial tombstone/record is unavailable or corrupt; "
+                          "refusing to restart it"}
+    if record is not None:
+        return {"created": False, "reason": "existing trial kept (%s)" % source,
+                "issued": record.get("issued")}
+    if source != "missing":
+        return {"created": False, "reason": "unusable existing trial; refusing reset"}
+    if not allow_create:
+        return {"created": False,
+                "reason": "trial record missing on existing data; refusing reset"}
+    record = _trial_record(machine_id, now.isoformat(), False)
     try:
-        mid = fingerprint().get("machine_id")
-        root = Path(getattr(layout, "system", Path(layout.data)))
-        path = root / "trial.json"
-        now = now or datetime.now(timezone.utc)
-        data = None
-        if path.exists():
-            try:
-                data = _json.loads(path.read_text("utf-8"))
-            except Exception:
-                data = None
-        if not isinstance(data, dict) or data.get("machine") != mid:
-            data = {"machine": mid, "issued": now.isoformat(), "days": TRIAL_DAYS}
-            root.mkdir(parents=True, exist_ok=True)
-            path.write_text(_json.dumps(data, ensure_ascii=False), "utf-8")
-        issued = datetime.fromisoformat(data["issued"])
-        if issued.tzinfo is None:
-            issued = issued.replace(tzinfo=timezone.utc)
-        left = (issued + timedelta(days=int(data.get("days", TRIAL_DAYS))) - now).total_seconds() / 86400.0
-        if left <= 0:
-            return None
-        return {
-            "status": "TRIAL",
-            "license_status": "TRIAL",
-            "publish_allowed": True,
-            "collect_allowed": True,
-            "days_left": round(left, 1),
-            "level": "ok",
-            "seat": None,
-            "notices": ["试用授权：剩余 %d 天，导入正式授权后自动切换。" % int(left)],
-            "reasons": [],
-            "clock_rollback": False,
-            "license_path": str(path),
-            "source": "trial",
-        }
-    except Exception:
+        _write_trial_record(layout, record)
+    except OSError as exc:
+        return {"created": False, "reason": "trial write failed: %s" % exc}
+    return {"created": True, "reason": "trial started", "issued": record["issued"]}
+
+
+def mark_trial_license_seen(layout, now=None, *, fingerprint_info=None):
+    """Record that a formal licence was installed, so its deletion grants no trial."""
+    from .fingerprint import fingerprint
+
+    now = _utc(now)
+    fp = fingerprint_info or fingerprint()
+    machine_id = str(fp.get("machine_id") or "")
+    if not machine_id or fp.get("weak"):
+        raise OSError("cannot bind trial tombstone: machine fingerprint is weak")
+    state = _collect_trial_records(layout, machine_id, now)
+    record = state.get("record")
+    issued = (record or {}).get("issued") or now.isoformat()
+    tombstone = _trial_record(machine_id, issued, True)
+    _write_trial_record(layout, tombstone)
+    return True
+
+
+def _trial_refusal(status, reason, clock_rollback=False):
+    return {
+        "status": status,
+        "license_status": "TRIAL",
+        "publish_allowed": False,
+        "collect_allowed": True,
+        "days_left": None,
+        "level": "bad",
+        "seat": None,
+        "notices": [],
+        "reasons": [reason],
+        "clock_rollback": bool(clock_rollback),
+        "license_path": "",
+        "source": "trial",
+    }
+
+
+def trial_state(layout, now=None, *, account_id=None, fingerprint_info=None,
+                clock=None):
+    """Return a trial verdict only from the sealed install-time record.
+
+    A missing, corrupt, deleted or machine-mismatched record is NOT recreated
+    here.  Clock rollback, a weak fingerprint and a missing account are checked
+    before any trial allowance is returned.
+    """
+    from pathlib import Path
+    from .fingerprint import fingerprint
+
+    now = _utc(now)
+    fp = fingerprint_info or fingerprint()
+    machine_id = str(fp.get("machine_id") or "")
+    if not machine_id or fp.get("weak"):
+        return _trial_refusal(
+            STATUS_WEAK_FINGERPRINT,
+            "本机机器指纹太弱，试用授权拒绝绑定；新增发布暂停。")
+    if clock is None:
+        from .customer_paths import layout_dir
+        clock = clock_guard(layout_dir(layout, "run", "run")
+                            / "license-clock.json", now=now)
+    clock_status = clock.get("status") or (
+        CLOCK_ROLLBACK if clock.get("rollback") else CLOCK_OK)
+    if clock.get("rollback") or not clock.get("state_ok", True):
+        return _trial_refusal(
+            clock_status,
+            "时钟校验未通过（%s）：为防绕过试用期，新增发布已暂停；"
+            "请校准系统时间后重试。" % clock_status,
+            clock_rollback=True)
+    # Read the registry tombstone BEFORE trusting any file record.  A restored
+    # old trial.json must never outvote a formal-licence tombstone.
+    state = _collect_trial_records(layout, machine_id, now)
+    if state["blocked"]:
         return None
+    if Path(layout.license_file).exists():
+        return None
+    record = state["record"]
+    if record is None or record.get("license_seen") is True:
+        return None
+    try:
+        issued = parse_time(record["issued"])
+    except (ValueError, TypeError, AttributeError):
+        return None
+    left = (issued + timedelta(days=TRIAL_DAYS) - now).total_seconds() / 86400.0
+    if left <= 0:
+        return None
+    seat = None
+    if account_id:
+        seat = {"account_id": account_id, "authorized": True, "enabled": True,
+                "reason": "试用期内"}
+    return {
+        "status": "TRIAL",
+        "license_status": "TRIAL",
+        "publish_allowed": True,
+        "collect_allowed": True,
+        "days_left": round(left, 1),
+        "level": "ok",
+        "seat": seat,
+        "notices": ["试用授权：剩余 %d 天，导入正式授权后自动切换。" % int(left)],
+        "reasons": [],
+        "clock_rollback": False,
+        "license_path": str(_trial_path(layout)),
+        "source": "trial",
+    }

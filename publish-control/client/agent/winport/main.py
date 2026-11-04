@@ -126,6 +126,26 @@ def _clear_ready_marker(layout, logger) -> None:
             pass
 
 
+def _write_clean_exit_marker(layout, logger) -> None:
+    """Tell the supervisor that this exit is orderly, not a crash.
+
+    The supervisor clears this file before every launch and validates either
+    the per-launch token (our own child) or the pid (an agent it took over).
+    """
+    try:
+        from .jsonio import write_json
+        payload = {"pid": os.getpid(), "ts": time.time(),
+                   "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                   "reason": "orderly shutdown"}
+        token = os.environ.get("WINPORT_SUPERVISOR_TOKEN", "").strip().lower()
+        if token:
+            payload["token"] = token
+        write_json(Path(layout.run) / "agent-clean-exit.json", payload)
+        logger.info("clean-exit marker written")
+    except Exception as exc:  # never turn an orderly exit into a crash
+        logger.warning("could not write clean-exit marker: %s", exc)
+
+
 def _write_agentpoll_marker(layout, logger, **fields) -> None:
     """Best-effort status marker before/without a fully valid AgentConfig."""
     try:
@@ -137,34 +157,7 @@ def _write_agentpoll_marker(layout, logger, **fields) -> None:
         logger.warning("could not write agentpoll status: %s", exc)
 
 
-_CONTROL_WATCH_STARTED = False
-
-
-def _watch_control_binding(layout, logger):
-    """Wait for first-run activation to write control.json, then start polling."""
-    global _CONTROL_WATCH_STARTED
-    if _CONTROL_WATCH_STARTED:
-        return
-    _CONTROL_WATCH_STARTED = True
-
-    def loop():
-        for _ in range(6 * 60 * 24 * 7):
-            for candidate in (Path(layout.data) / "control.json",
-                              Path(layout.program) / "control.json"):
-                try:
-                    if candidate.is_file():
-                        poller = _start_agentpoll(layout, logger, allow_watch=False)
-                        if poller is not None:
-                            logger.info("binding picked up from %s", candidate)
-                            return
-                except Exception as exc:
-                    logger.warning("binding retry failed: %s", exc)
-            time.sleep(10)
-
-    threading.Thread(target=loop, name="binding-watch", daemon=True).start()
-
-
-def _start_agentpoll(layout, logger, allow_watch=True):
+def _start_agentpoll(layout, logger):
     """Start the control-plane poller as part of the normal startup chain.
 
     The poller is disabled when no CUSTOMER_TOKEN is configured (the legacy
@@ -189,7 +182,10 @@ def _start_agentpoll(layout, logger, allow_watch=True):
                 data = json.loads(candidate.read_text(encoding="utf-8"))
                 for key, env_name in (("control_url", "CONTROL_URL"),
                                       ("customer_id", "CUSTOMER_ID"),
-                                      ("customer_token", "CUSTOMER_TOKEN")):
+                                      ("customer_token", "CUSTOMER_TOKEN"),
+                                      ("device_id", "DEVICE_ID"),
+                                      ("device_token", "DEVICE_TOKEN"),
+                                      ("binding_epoch", "DEVICE_BINDING_EPOCH")):
                     value = str(data.get(key) or "").strip()
                     if value:
                         overlay[env_name] = value
@@ -198,8 +194,6 @@ def _start_agentpoll(layout, logger, allow_watch=True):
                 break
         except Exception as exc:  # noqa: BLE001 - bad file must not kill panel
             logger.warning("control.json ignored (%s): %s", candidate, exc)
-    if not overlay.get("CONTROL_URL") and allow_watch:
-        _watch_control_binding(layout, logger)
     merged_env = dict(os.environ)
     merged_env.update(overlay)
     try:
@@ -225,8 +219,6 @@ def _start_agentpoll(layout, logger, allow_watch=True):
         write_status(config, state="disabled",
                      reason="CUSTOMER_TOKEN is not configured")
         logger.info("agentpoll disabled: CUSTOMER_TOKEN is not configured")
-        if allow_watch:
-            _watch_control_binding(layout, logger)
         return None
     try:
         poller = AgentPoller(config, logger=logger)
@@ -436,7 +428,11 @@ def _run_agent(layout, logger, args) -> int:
         except Exception as exc:
             logger.error("update loop startup failed: %s", exc)
 
+    clean_shutdown_requested = False
+
     def _stop(*_):
+        nonlocal clean_shutdown_requested
+        clean_shutdown_requested = True
         approval_stop.set()
         shutdown_event.set()
         if update_loop is not None:
@@ -453,9 +449,13 @@ def _run_agent(layout, logger, args) -> int:
     except (ValueError, OSError):
         pass
 
+    normal_return = False
     try:
-        return daemon.run_forever(max_rounds=1 if args.once else None,
-                                  stop_event=shutdown_event if not args.once else None)
+        code = daemon.run_forever(
+            max_rounds=1 if args.once else None,
+            stop_event=shutdown_event if not args.once else None)
+        normal_return = True
+        return code
     finally:
         approval_stop.set()
         shutdown_event.set()
@@ -468,6 +468,8 @@ def _run_agent(layout, logger, args) -> int:
         _clear_ready_marker(layout, logger)
         tray.stop()
         guard.release()
+        if normal_return or clean_shutdown_requested:
+            _write_clean_exit_marker(layout, logger)
 
 
 if __name__ == "__main__":
