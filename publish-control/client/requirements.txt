@@ -1,0 +1,10 @@
+# Offline wheel set installed by bootstrap (pip install --no-index --find-links
+# wheels -r requirements.txt).  These are the runtime deps the Windows port
+# needs on top of the stdlib.  Pin exact versions at build time and drop the
+# matching wheels into wheels/.
+playwright==1.47.0
+psutil==6.0.0
+pystray==0.19.5
+pillow==10.4.0
+cryptography==43.0.1
+win10toast==0.9

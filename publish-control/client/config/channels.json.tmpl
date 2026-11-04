@@ -1,0 +1,66 @@
+﻿{
+  "_note": "登录位（通道）登记表。一个 channel = 一个账号 = 一个独立登录态目录 + 一个独立调试端口 + 一个独立状态灯；掉线只提醒掉的那个。抖音/星图/视频号/小红书/公众号是内置预设，本文件可覆盖 login_url/check_url/端口/昵称；加平台只改本文件、不改代码：复制一段、把 platform 换成本文件 platform_presets 里没有的新名字时，请同时补 login_url/check_url。debug_port 写 null 表示该通道没有 CDP 端口（WebKit），不要瞎编一个。",
+  "panel": { "host": "127.0.0.1", "port": 9223 },
+  "channels": [
+    {
+      "channel_id": "douyin-001",
+      "platform": "douyin",
+      "nickname": "漫半拍",
+      "account_id": "douyin-pilot-001",
+      "engine": "chromium",
+      "profile": "douyin",
+      "debug_port": 9224,
+      "enabled": true
+    },
+    {
+      "channel_id": "douyin-002",
+      "platform": "douyin",
+      "nickname": "蜡笔新小漫",
+      "account_id": "douyin-pilot-002",
+      "engine": "webkit",
+      "profile": "douyin-webkit",
+      "debug_port": null,
+      "enabled": false
+    },
+    {
+      "channel_id": "xingtu-001",
+      "platform": "xingtu",
+      "nickname": "星图后台",
+      "account_id": "xingtu-pilot-001",
+      "engine": "chromium",
+      "profile": "xingtu",
+      "debug_port": 9225,
+      "enabled": true
+    },
+    {
+      "channel_id": "shipinhao-001",
+      "platform": "shipinhao",
+      "nickname": "视频号助手",
+      "account_id": "shipinhao-pilot-001",
+      "engine": "chromium",
+      "profile": "shipinhao",
+      "debug_port": 9226,
+      "enabled": true
+    },
+    {
+      "channel_id": "xiaohongshu-001",
+      "platform": "xiaohongshu",
+      "nickname": "小红书创作中心",
+      "account_id": "xiaohongshu-pilot-001",
+      "engine": "chromium",
+      "profile": "xiaohongshu",
+      "debug_port": 9227,
+      "enabled": true
+    },
+    {
+      "channel_id": "gongzhonghao-001",
+      "platform": "gongzhonghao",
+      "nickname": "公众号后台",
+      "account_id": "gongzhonghao-pilot-001",
+      "engine": "chromium",
+      "profile": "gongzhonghao",
+      "debug_port": 9228,
+      "enabled": true
+    }
+  ]
+}

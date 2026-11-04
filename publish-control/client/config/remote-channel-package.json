@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "remote_support": "disabled_until_local_provisioning",
+  "secrets_in_package": false,
+  "local_provisioning_required": ["relay.json", "client_key", "known_hosts"],
+  "key_policy": "per-customer key imported after installation; server-side login restricted to the assigned reverse-forward listener; never a license signing key",
+  "verification": "the client verifies key_sha256 from relay.json and uses strict host-key checking",
+  "degraded_behavior": "remote support remains off when local provisioning is absent; publishing and the local panel continue normally"
+}

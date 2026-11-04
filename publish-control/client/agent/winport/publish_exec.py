@@ -36,12 +36,21 @@ from .stage2_ledger import Stage2Ledger, content_hash, idempotency_key
 from .idempotency import material_fingerprint, publish_key
 from . import xingtu_tasks
 from .version import VERSION
-from .publish_guard import (PublishHoldStore, UploadAttempt, classify_fault,
+from .publish_guard import (CAPTCHA, LOGIN_LOST, RISK_CONTROL, SMS_VERIFICATION,
+                            PublishHoldStore, UploadAttempt, classify_fault,
                             make_upload_attempt, media_metadata, ffprobe_media_metadata,
                             transcode_failure_reasons, upload_failure_reasons,
                             validate_selectors,
                             is_ascii_mid,
                             PUBLISH_UNKNOWN)
+
+#: Faults that must still freeze the channel when they happen *before* the
+#: publish click.  A pre-submit failure normally only recycles its ledger
+#: reservation (nothing was submitted, so retrying is safe), but a captcha,
+#: an SMS verification challenge, a risk-control stop or a lost login blocks
+#: every task queued behind it until a human fixes the account.
+PRE_SUBMIT_FREEZE_KINDS = frozenset({CAPTCHA, RISK_CONTROL, LOGIN_LOST,
+                                     SMS_VERIFICATION})
 
 # Internal deadline accounting must not consume a test's patched
 # ``time.monotonic`` side-effect sequence meant for publish logic.
@@ -3692,17 +3701,42 @@ class PlaywrightDriver:
             pass
         raise GateRed(reason)
 
+    @staticmethod
+    def _classify_hold_kind(reason, step, extra, kind=None):
+        """Resolve the fault kind, feeding page evidence into the classifier.
+
+        ``_fail`` callers often keep the page text (which is what actually
+        proves a captcha / SMS / risk-control stop) inside ``extra``; the
+        classifier must see it or every such stop degrades to
+        ``publish_unknown``.
+        """
+        if kind:
+            return kind
+        evidence = {"reason": str(reason), "step": step}
+        for source in (extra, (extra or {}).get("extra") if isinstance(extra, dict) else None):
+            if not isinstance(source, dict):
+                continue
+            for key in ("page_text", "html", "console", "body_text", "url", "error"):
+                value = source.get(key)
+                if value and key not in evidence:
+                    evidence[key] = value
+        try:
+            return classify_fault(evidence) or PUBLISH_UNKNOWN
+        except Exception:
+            return PUBLISH_UNKNOWN
+
     def _apply_hold(self, reason, step, extra, *, kind=None):
-        if getattr(self, "_pre_submit", False):
+        kind = self._classify_hold_kind(reason, step, extra, kind)
+        if getattr(self, "_pre_submit", False) and kind not in PRE_SUBMIT_FREEZE_KINDS:
+            # Before the publish click nothing was submitted, so an ordinary
+            # fill failure only recycles its ledger reservation and leaves the
+            # channel open.  Account-level stops are the exception above: they
+            # must hold the channel even though the reservation is recycled.
             return
         if (getattr(self, "_hold_store", None) is None
                 or getattr(getattr(self, "channel", None), "channel_id", None) is None):
             return
         # Persist before any page query/evidence collection.
-        try:
-            kind = kind or classify_fault({"reason": str(reason), "step": step}) or PUBLISH_UNKNOWN
-        except Exception:
-            kind = PUBLISH_UNKNOWN
         self.last_hold_result = self._hold_store.persist_failure(
             getattr(self.channel, "channel_id"), kind,
             {"reason": str(reason), "step": step, "extra": extra or {}},
@@ -9959,6 +9993,33 @@ def run_publish(plan, driver, ledger: Stage2Ledger, *, mode=MODE_FILL,
                 driver._pre_submit_failed = False
                 driver._pre_submit = False
                 freeze_execution_failure(exc, step="fill_pre_submit_recycle_failed")
+            else:
+                # The reservation is gone, but an account-level stop (captcha,
+                # SMS, risk control, lost login) must still freeze the channel:
+                # otherwise every queued task walks into the same wall.
+                try:
+                    pre_kind = classify_fault({"reason": str(exc), "step": "fill"})
+                except Exception:
+                    pre_kind = None
+                if pre_kind in PRE_SUBMIT_FREEZE_KINDS:
+                    driver._pre_submit = False
+                    held = False
+                    store = getattr(driver, "_hold_store", None)
+                    channel_id = getattr(getattr(driver, "channel", None), "channel_id", None)
+                    if store is not None and channel_id:
+                        try:
+                            held = store.get(channel_id) is not None
+                        except Exception:
+                            held = False
+                    apply_hold = getattr(driver, "_apply_hold", None)
+                    if not held and callable(apply_hold):
+                        try:
+                            apply_hold(str(exc), "fill", {"code": pre_kind},
+                                       kind=pre_kind)
+                        except Exception:
+                            freeze_execution_failure(exc, step="fill_account_hold")
+                    elif not held:
+                        freeze_execution_failure(exc, step="fill_account_hold")
         raise
     finally:
         driver._pre_submit = False

@@ -1,0 +1,131 @@
+{
+  "customer_id": "",
+  "timezone": "Asia/Shanghai",
+  "schedule": {
+    "min_lead_minutes": 130,
+    "max_horizon_days": 14,
+    "avoid_minute_marks": [
+      0,
+      5,
+      10,
+      15,
+      20,
+      25,
+      30,
+      35,
+      40,
+      45,
+      50,
+      55
+    ],
+    "gap_min": 5,
+    "gap_max": 8,
+    "windows": [
+      [
+        "07:00",
+        "09:30"
+      ],
+      [
+        "11:00",
+        "13:30"
+      ],
+      [
+        "17:00",
+        "19:30"
+      ],
+      [
+        "20:00",
+        "22:30"
+      ]
+    ],
+    "window_entries": [
+      {
+        "id": "morning",
+        "start": "07:00",
+        "end": "09:30",
+        "enabled": true
+      },
+      {
+        "id": "noon",
+        "start": "11:00",
+        "end": "13:30",
+        "enabled": true
+      },
+      {
+        "id": "evening",
+        "start": "17:00",
+        "end": "19:30",
+        "enabled": true
+      },
+      {
+        "id": "night",
+        "start": "20:00",
+        "end": "22:30",
+        "enabled": true
+      }
+    ],
+    "max_per_day_per_account": 0,
+    "cross_account_gap_minutes": [
+      5,
+      8
+    ],
+    "backoff": {
+      "initial_minutes": 30,
+      "multiplier": 2.0,
+      "max_minutes": 360
+    }
+  },
+  "downlink": {
+    "poll_interval_seconds": 300,
+    "max_concurrency": 2,
+    "retry_backoff_seconds": [
+      5,
+      15,
+      45,
+      135
+    ],
+    "manifest_url_ttl_seconds": 600,
+    "media_url_ttl_seconds": 3600,
+    "bandwidth_limit_kbps": 0,
+    "local_bucket": "",
+    "token_endpoint": ""
+  },
+  "retention_days": 14,
+  "disk_watermark_gb": 5,
+  "sms_wait_seconds": 180,
+  "verification_detect_seconds": 30,
+  "qr_wait_seconds": 300,
+  "alerts": {
+    "tray": true,
+    "upload_summary": true
+  },
+  "feishu_approval": {
+    "enabled": true,
+    "endpoint": "",
+    "client_token": "",
+    "timeout_minutes": 30,
+    "poll_interval_seconds": 15
+  },
+  "panel": {
+    "host": "127.0.0.1",
+    "port": 9223
+  },
+  "publish_queue": {
+    "enabled": false
+  },
+  "updates": {
+    "enabled": true,
+    "manifest_url": "",
+    "check_interval_seconds": 3600,
+    "initial_delay_seconds": 180,
+    "request_timeout_seconds": 30,
+    "download_retries": 4,
+    "failed_retry_seconds": 21600,
+    "health_timeout_seconds": 60,
+    "tunnel_timeout_seconds": 30,
+    "allow_insecure_http": false
+  },
+  "remote_channel": {
+    "enabled": true
+  }
+}

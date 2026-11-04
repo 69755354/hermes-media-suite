@@ -1,0 +1,27 @@
+﻿{
+  "_note": "环境(environment)登记表 —— 最终口径见 source/env-design.md。一个环境 = 一个独立 Chrome 用户目录(profiles/<profile>) + 一个独立调试端口 + 一套独立登录态 + 一个状态灯 + 一个桌面图标。环境内的多个平台共用这一套登录态（同账号体系）。硬规则：一个环境同时只允许一个实例；一个平台只能归属一个环境；不同环境可并行。加平台/加环境/拆环境 = 只改本文件，不改代码。",
+  "_how_to_add_environment": "复制一段 environments[]，改 env_id / label / profile / debug_port，列上 platforms。平台名要能在 platforms.PLATFORM_PRESETS 里找到，否则请在本文件 platform_overrides 里给该平台补 login_url/check_url。",
+  "_how_to_add_platform": "把平台名加进某个环境的 platforms[]；若该平台预设里没有登录地址，在 platform_overrides 里补一条。",
+  "platform_overrides": {},
+  "environments": [
+    { "env_id": "env_1", "label": "1号", "nickname": "1号（抖音）",
+      "profile": "env_1", "debug_port": 9224,
+      "platforms": ["douyin", "xingtu"],
+      "proxy": null, "enabled": true, "visible": true },
+
+    { "env_id": "env_2", "label": "2号", "nickname": "2号（抖音）",
+      "profile": "env_2", "debug_port": 9225,
+      "platforms": ["douyin", "xingtu"],
+      "proxy": null, "enabled": true, "visible": true },
+
+    { "env_id": "env_wechat", "label": "微信", "nickname": "微信（视频号/公众号）",
+      "profile": "env_wechat", "debug_port": 9226,
+      "platforms": ["shipinhao", "gongzhonghao"],
+      "proxy": null, "enabled": true, "visible": false },
+
+    { "env_id": "env_xhs", "label": "小红书", "nickname": "小红书",
+      "profile": "env_xhs", "debug_port": 9227,
+      "platforms": ["xiaohongshu"],
+      "proxy": null, "enabled": true, "visible": false }
+  ]
+}

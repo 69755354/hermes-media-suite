@@ -1,4 +1,4 @@
-﻿# 1.2.175 实现验证记录
+﻿# 1.2.176 实现验证记录
 
 本轮补全 supervisor 退出诊断、安装握手失败与面板启动失败的实际原因；面板保留已验证 owner，仅停止多余 supervisor；安装同版本重装也先停 supervisor 再停 agent，避免 60 秒崩溃退避。前轮 report key、清理枚举与镜像白名单修复保留。实现与 Linux 定向自检不代表 Windows 实机验收或独立终审。
 
@@ -13,6 +13,12 @@ report 不再使用内置 demo key；心跳与上传均要求显式非空 key（
 保留历史约束：注册表异常 fail-closed；星图点击与回读绑定同一 DOM 实例，挂载证据限定同一直接容器；旧 v1 试用不自动重签。enrollment token 为既有扫描白名单，扫描不证明服务端绑定与撤销机制。
 
 自检记录见外部 FIX_REPORT_1.2.167_GPT.md；Windows WMI/VBS、Task Scheduler、双入口竞争及真实发布仍待实机验证。
+
+## 1.2.176 相对 1.2.175 的变更
+- `agent/winport/publish_exec.py`：pre-submit 窗口不再无条件抑制 hold。验证码、短信验证、风控、登录失效四类故障即使发生在 fill 阶段（点发布之前）也写入通道冻结，避免账号异常后队列继续撞墙；其余 fill 前置失败仍只回收账本占位、不冻结，可安全重试。异常文本与 `extra` 中的页面证据都会参与故障分类。
+- `agent/winport/publish_exec.py`：fill 阶段抛出未经过 `_fail` 的账号级异常时，`run_publish` 在回收占位后按具体故障类型补写冻结，不再只依赖驱动内部调用点。
+- `tests/test_presubmit_hold.py`：新增 7 条用例覆盖上述规则（登录/短信/风控/验证码冻结，普通前置失败不冻结，提交后失败仍冻结，显式 kind 优先）。
+- `tools/devsign.py`：补回仓库（DEV/TEST-ONLY，不含生产私钥，按调用方传入的测试种子签名）；`tests/receipt_fixture.py`、`config/` 模板与入口脚本一并补齐，使 `static_verify.py` / `e2e_selfverify.py` 可在源码树内直接运行。
 
 ## 1.2.175 相对 1.2.174-r2 的变更
 - `agent/winport/publish_exec.py`：fill 阶段的前置失败（话题回读、封面、上传等，未进入发布点击）改为回收账本 v2 占位并保持通道未冻结；`_click_failed` 仍按不确定结果处理（UNKNOWN + 冻结）。回收失败时回退为冻结，避免静默反复撞 RESERVED。
