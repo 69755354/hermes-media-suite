@@ -185,6 +185,7 @@ TRANSCODE_DONE_SELECTORS = (
 # 1.2.96: Douyin's publish page does not always keep a transcode status node
 # or a "transcode complete" label.  These are the page facts that prove the
 # editor is ready: a real publish button plus no blocking status text.
+# selector-ok: read-only
 TRANSCODE_PUBLISH_BUTTON_SELECTORS = (
     "button:has-text('\u53d1\u5e03')",
     "button:text-is('\u4f5c\u54c1\u53d1\u5e03')",
@@ -248,6 +249,7 @@ COVER_HINT_DISMISS_SELECTORS = (
 )
 # Preview-container selectors are a bonus signal only.  Douyin ships hashed
 # class names after a build, so a selector miss must never hide a real preview.
+# selector-ok: read-only
 VIDEO_PREVIEW_CONTAINER_SELECTORS = (
     "[data-e2e*='preview']",
     "[data-testid*='preview']",
@@ -393,15 +395,6 @@ COVER_DONE_TEXTS = ("\u5b8c\u6210", "\u786e\u5b9a")
 # done control is resolved structurally first and only then by text/role.
 # 1.2.102: the vertical and horizontal cover editors each render a primary
 # done button; the footer's last visible enabled one is the real control.
-COVER_DONE_SELECTORS = (
-    "button.semi-button-primary",
-    'button.semi-button-primary:has-text("\u5b8c\u6210")',
-    'button.semi-button-primary:has-text("\u786e\u5b9a")',
-    'button:has-text("\u5b8c\u6210")',
-    'button:has-text("\u786e\u5b9a")',
-    '[role=button]:has-text("\u5b8c\u6210")',
-    '[role=button]:has-text("\u786e\u5b9a")',
-)
 COVER_DONE_TEXT = "\u5b8c\u6210"
 COVER_DONE_CLICK_TIMEOUT_MS = 5000
 COVER_DONE_CLOSE_WAIT_SECONDS = 5.0
@@ -426,15 +419,19 @@ XINGTU_PICKER_OPEN_TEXTS = ("\u8bf7\u9009\u62e9\u661f\u56fe\u4efb\u52a1",
                             "\u9009\u62e9\u661f\u56fe\u4efb\u52a1")
 XINGTU_REPLACE_TEXTS = ("\u66f4\u6362",)
 XINGTU_SEARCH_SELECTOR = 'input[placeholder="\u8f93\u5165\u4efb\u52a1id/\u4efb\u52a1\u540d\u79f0"]'
+# selector-ok: read-only
 XINGTU_PORTAL_SELECTOR = 'div[class*="semi-portal"]'
 #: The picker is one exact Semi Design portal.  Use the exact class for the
 #: selection contract; ``class*=`` also matches inner wrappers and must never
 #: be used to decide "there is only one portal".
 XINGTU_PICKER_PORTAL_SELECTOR = 'div.semi-portal'
+# selector-ok: read-only
 XINGTU_CARD_SELECTOR = 'div[class*="card-container-"]'
 XINGTU_CARD_CLASS_RE = (r"^card-container-(?!creator-layout(?:$|-))"
                         r"[A-Za-z0-9_-]{4,}$")
+# selector-ok: read-only
 XINGTU_TASK_NAME_SELECTOR = '[class*="task-name"]'
+# selector-ok: read-only
 XINGTU_TASK_TITLE_SELECTOR = ('[class*="task-name"], [class*="taskName"], '
                               '[class*="task-title"], [class*="task_title"]')
 XINGTU_RADIO_SELECTOR = "label.semi-radio"
@@ -1927,6 +1924,7 @@ def _cover_clickable_element(item):
     the span's parent.  The label itself remains the fallback.
     """
     try:
+        # selector-ok: scoped-unique
         handle = item.evaluate_handle("""el => {
           const visible = node => {
             if (!node) return false;
@@ -2161,6 +2159,7 @@ def _xingtu_mount_contract(page, task):
     if not expected:
         return result
     try:
+        # selector-ok: scoped-unique
         value = page.evaluate(r"""({expectedName}) => {
 """ + xingtu_tasks.XINGTU_VISIBLE_CARD_NAME_JS + r"""
           const clean = value => String(value || '')
@@ -5020,6 +5019,7 @@ class PlaywrightDriver:
                              extra={"order_id": task.get("order_id"),
                                     "task_name": task.get("task_name")})
                 return True
+            # wait-ok: poll
             time.sleep(0.8)
             try:
                 self._page.wait_for_timeout(800)
@@ -6295,6 +6295,7 @@ class PlaywrightDriver:
         counts are kept for diagnostics because the live page leaves hidden
         modal nodes in the DOM after a successful close.
         """
+        # selector-ok: read-only
         script = """() => {
           const visible = el => {
             if (!el) return false;
@@ -6505,6 +6506,7 @@ class PlaywrightDriver:
 
     def _cover_profile_cover_count(self):
         """Visible ``profileCover`` nodes currently mounted in every frame."""
+        # selector-ok: read-only
         expression = r"""() => {
           const visible = el => {
             if (!el) return false;
@@ -6864,6 +6866,7 @@ class PlaywrightDriver:
     def _cover_modal_visible(self, timeout=0.0):
         """True when the 设置封面 modal (with the frame timeline) is open."""
         end = time.monotonic() + max(0.0, float(timeout))
+        # selector-ok: read-only
         probe = ("() => [...document.querySelectorAll("
                  "\"div[class*=modal]\")].some(e => e.offsetParent && "
                  "/\u8bbe\u7f6e\u7ad6\u5c01\u9762/.test(e.innerText||\"\"))")
@@ -6875,6 +6878,7 @@ class PlaywrightDriver:
                 pass
             if time.monotonic() >= end:
                 return False
+            # wait-ok: poll
             time.sleep(0.4)
 
     def _cover_modal_open(self):
@@ -6926,12 +6930,38 @@ class PlaywrightDriver:
                 if marker in text:
                     return "passed", text
             self._upload_heartbeat()
+            # wait-ok: poll
             time.sleep(0.5)
         if not clicked:
             return "missing", text
         if "\u68c0\u6d4b\u4e2d" in text:
             return "pending", text
         return "missing", text
+
+    def _wait_cover_frame_selected(self, box, timeout_ms=2000):
+        """Wait until the clicked frame reports a selection marker.
+
+        Replaces the fixed 0.8 s pause: on a slow machine detection began while
+        the previous frame was still the selected one. The probe only reads the
+        DOM and is bounded, so a site change cannot hang the publish.
+        """
+        # selector-ok: read-only
+        probe = ("() => { const w=[...document.querySelectorAll("
+                 "\"[class*=preview-frames]\")].find(e => e.offsetParent); "
+                 "if(!w) return false; return !![...w.querySelectorAll("
+                 "'[aria-selected=\"true\"],[class*=selected],[class*=active]')]"
+                 ".find(e => e.offsetParent); }")
+        for _ in range(max(1, int(timeout_ms / 100))):
+            try:
+                if self._page.evaluate(probe):
+                    return True
+            except Exception:
+                pass
+            try:
+                self._page.wait_for_timeout(100)
+            except Exception:
+                break
+        return False
 
     def _cover_modal_pick(self, ratio=0.0):
         """Pick a frame on the modal timeline and run 封面检测.
@@ -6944,6 +6974,7 @@ class PlaywrightDriver:
             return {"result": "missing", "reason": "cover_modal_not_open"}
         box = None
         try:
+            # selector-ok: read-only
             box = self._page.evaluate(
                 "() => { const w=[...document.querySelectorAll("
                 "\"[class*=preview-frames]\")].find(e => e.offsetParent); "
@@ -6961,7 +6992,7 @@ class PlaywrightDriver:
                 self._page.mouse.move(x, y)
                 self._page.mouse.down()
                 self._page.mouse.up()
-                time.sleep(0.8)
+                self._wait_cover_frame_selected(box)
             except Exception:
                 pass
         status, text = self._cover_modal_check()
@@ -7636,6 +7667,7 @@ class PlaywrightDriver:
         empty = {"count": 0, "selected_index": -1, "items": [],
                  "section": "", "mode": "", "frame": 0,
                  "sections": {"vertical": 0, "horizontal": 0}}
+        # selector-ok: scoped-unique
         script = r"""(root, specs) => {
           const doc = (root && root.ownerDocument) || document;
           const clean = value => String(value || '')
@@ -8818,6 +8850,7 @@ class PlaywrightDriver:
         first frame background, preview-container backgrounds and the number
         of ``profileCover`` nodes.
         """
+        # selector-ok: read-only
         script = r"""() => {
           const visible = el => {
             if (!el || !el.getBoundingClientRect) return false;

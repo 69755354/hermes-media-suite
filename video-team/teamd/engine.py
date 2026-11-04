@@ -5,6 +5,7 @@ import json, os, hashlib, pathlib, time
 from . import db
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+DATA_ROOT = pathlib.Path(os.environ.get("TEAM_DATA") or ROOT)
 PIPE = json.loads((ROOT / "pipeline.json").read_text(encoding="utf-8"))["stages"]
 ROLES = json.loads((ROOT / "roles.json").read_text(encoding="utf-8"))
 STAGE = {s["id"]: s for s in PIPE}
@@ -169,7 +170,7 @@ def done(tid, sid, artifact, note="", actor="leader"):
     if left == 0:
         con.execute("UPDATE tasks SET status='closed', closed_at=? WHERE id=?", (db.now(), tid))
     con.commit()
-    hp = ROOT / "handoffs" / f"{tid}_{sid}.md"; hp.parent.mkdir(exist_ok=True)
+    hp = DATA_ROOT / "handoffs" / f"{tid}_{sid}.md"; hp.parent.mkdir(exist_ok=True)
     nxt = [x for x in PIPE if sid in x.get("needs", [])]
     hp.write_text(f"# 交接单 {tid} · {s['name']}\n\n- 片名：{t['title']}\n- 完成：{db.now()}\n- 产出物：{artifact}\n- 说明：{note or '无'}\n\n## 下游\n" +
                   ("\n".join(f"- {x['name']}（{ROLES[x['owner']]['name']}）" for x in nxt) or "- 结束") + "\n", encoding="utf-8")
@@ -276,7 +277,7 @@ def record_brief(tid, sid, text):
 
 def _brief_gate(tid, sid):
     """任务书物理闸：没编译出本次任务书不许开工。"""
-    bp = ROOT / "briefs" / f"{tid}_{sid}.md"
+    bp = DATA_ROOT / "briefs" / f"{tid}_{sid}.md"
     if not bp.exists():
         raise Blocked(f"没有任务书 {bp.name}，先 brief 再开工")
     txt = bp.read_text(encoding="utf-8", errors="ignore")
@@ -322,7 +323,7 @@ def _approval_file(tid, sid):
     """放行文件按台账隔离，避免测试库/生产库互相串。"""
     dbp = os.environ.get("TEAM_DB") or str(ROOT / CFG.get("db", "state/team.db"))
     key = hashlib.sha1(dbp.encode()).hexdigest()[:8]
-    d = ROOT / "approvals" / key
+    d = DATA_ROOT / "approvals" / key
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{sid}_{tid}.ok"
 

@@ -2003,6 +2003,7 @@ def finalize_readback(result: dict, readback: dict, *, mode: str = "publish") ->
 
 
 def _js_task_cards() -> str:
+    # selector-ok: scoped-unique
     return r"""() => {
       const out=[], seen=new Set();
       const push=(root)=>{
@@ -2032,9 +2033,19 @@ def _js_task_cards() -> str:
         push(root);
       }
       if(!out.length){
-        const candidates=[...document.querySelectorAll(
-          '[class*=task-item],[class*=taskItem],[class*=item-list] > div,[class*=list] > div')];
-        for(const node of candidates){
+        // 1.2.177: the old fallback also matched every div under any class
+        // containing "list", which pulled in navigation and page chrome.  Only
+        // accept item rows, and only from a single visible item-list container.
+        const visible = el => !!(el.offsetWidth || el.offsetHeight ||
+                                 el.getClientRects().length);
+        const containers = [...document.querySelectorAll('[class*=item-list]')]
+          .filter(visible);
+        const candidates = [...document.querySelectorAll(
+          '[class*=task-item],[class*=taskItem]')];
+        if(containers.length === 1){
+          candidates.push(...containers[0].querySelectorAll(':scope > div'));
+        }
+        for(const node of new Set(candidates)){
           const text=(node.innerText||'');
           if(text.includes('\u4efb\u52a1') || text.includes('\u9700\u6c42\u65b9')) push(node);
         }
@@ -2195,6 +2206,7 @@ _JS_PICKER_OPEN_MODAL = r"""() => {
 }"""
 
 
+# selector-ok: scoped-unique
 _JS_PICKER_CARDS = r"""() => {
   const clean = s => String(s || '').replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
   const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
@@ -2240,6 +2252,7 @@ def _picker_control(page, timeout_ms=20000):
         try:
             page.wait_for_timeout(500)
         except Exception:
+            # wait-ok: poll
             time.sleep(0.5)
     return None
 
@@ -2276,6 +2289,7 @@ def _open_picker(page, timeout_ms=20000):
             try:
                 page.wait_for_timeout(500)
             except Exception:
+                # wait-ok: poll
                 time.sleep(0.5)
         element = _picker_control(page, 3000) or element
     return False

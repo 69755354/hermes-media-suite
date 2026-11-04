@@ -1,0 +1,5 @@
+# Byte-exact checkout.
+# The release ships MANIFEST.json + SHA256SUMS.txt for every file; if Git
+# rewrites LF/CRLF on a Windows checkout, the working tree no longer matches
+# the published hashes.  -text disables all end-of-line conversion.
+* -text

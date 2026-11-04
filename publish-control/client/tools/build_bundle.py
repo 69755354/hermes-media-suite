@@ -129,6 +129,12 @@ def build(root: Path, out_dir: Path | None = None, *, version="1.0.0") -> dict:
     root = Path(root)
     out_dir = Path(out_dir) if out_dir else root
     binding_path = out_dir / SELF_BINDING_REL
+    # 1.2.177: a release tree is not complete without the self-binding file, and
+    # verify() (rightly) refuses a tree that lacks it.  Generate the placeholder
+    # when the caller did not supply one, so build+verify is a closed loop.
+    if out_dir == root and not binding_path.exists():
+        write_self_binding(binding_path, {"schema_version": "1.0",
+                                          "version": version})
     if binding_path.exists():
         try:
             binding = json.loads(binding_path.read_text(encoding="utf-8-sig"))

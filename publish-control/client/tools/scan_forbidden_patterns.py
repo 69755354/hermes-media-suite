@@ -104,8 +104,142 @@ def read_text(path: Path) -> str:
     return data.decode("utf-8", "replace")
 
 
+MARKER_RE = re.compile(r"(?:#|')\s*(wait-ok|selector-ok)\s*:\s*([A-Za-z-]+)")
+CLICK_TOKENS = (".click(", ".tap(", ".press(", "mouse.down", "mouse.up",
+                ".fill(", "select_option(", 'dispatch_event("click"',
+                "dispatch_event('click'")
+#: Evidence that a resolver can only yield one node: an explicit count guard,
+#: or a single-valued resolver (closest/querySelector return at most one node).
+UNIQUE_GUARD_RE = re.compile(
+    r"(?:!==|===|==|!=)\s*1\b|\.count\s*\(|to_have_count\s*\(\s*1"
+    r"|\bclosest\s*\(|\bquerySelector\s*\(")
+SCOPED_TOKEN_RE = re.compile(
+    r"\b(scope|root|container|containers|card|cards|row|rows|panel|el)\b")
+
+
+def _py_index(text: str, lines=None):
+    """Line map for structural marker checks: strings, loops, statements."""
+    if lines is None:
+        lines = text.splitlines()
+
+    def seg(node):
+        end = getattr(node, "end_lineno", node.lineno)
+        return "\n".join(lines[node.lineno - 1:end])
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", [])
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    strings, loops, stmts, funcs = [], set(), [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            strings.append((node.lineno, getattr(node, "end_lineno", node.lineno),
+                            id(node) in docstrings))
+        if isinstance(node, (ast.While, ast.For, ast.AsyncFor)):
+            for ln in range(node.lineno, getattr(node, "end_lineno", node.lineno) + 1):
+                loops.add(ln)
+        if isinstance(node, ast.stmt):
+            stmts.append((node.lineno, getattr(node, "end_lineno", node.lineno),
+                          seg(node)))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append((node.lineno, getattr(node, "end_lineno", node.lineno),
+                          seg(node)))
+    return {"strings": strings, "loops": loops, "stmts": stmts, "funcs": funcs}
+
+
+def _smallest(ranges, line):
+    best = None
+    for item in ranges:
+        if item[0] <= line <= item[1]:
+            if best is None or (item[1] - item[0]) < (best[1] - best[0]):
+                best = item
+    return best
+
+
+def _marker_for(lines, index, line_no):
+    """Find a marker on the hit line, the enclosing statement, or just above it."""
+    if index is not None:
+        stmt = _smallest(index["stmts"], line_no)
+        if stmt:
+            lo = max(1, stmt[0] - 2)
+            for ln in range(lo, stmt[1] + 1):
+                if ln <= len(lines):
+                    found = MARKER_RE.search(lines[ln - 1])
+                    if found:
+                        return found.group(1), found.group(2), ln
+    for ln in (line_no, line_no - 1, line_no - 2):
+        if 1 <= ln <= len(lines):
+            found = MARKER_RE.search(lines[ln - 1])
+            if found:
+                return found.group(1), found.group(2), ln
+    return None
+
+
+def _marker_allows(path, index, lines, line_no, kind):
+    """Return (allowed, reason).  The marker is an attestation, not a blanket.
+
+    * ``# wait-ok: poll``       -- only inside a loop (Python is AST-checked;
+                                   script hosts have no AST, marker only).
+    * ``# selector-ok: read-only`` -- the enclosing statement must not click.
+    * ``# selector-ok: scoped-unique`` -- enclosing function must contain a
+                                   uniqueness guard and the statement must use a
+                                   scoped root token.
+    """
+    found = _marker_for(lines, index, line_no)
+    if not found:
+        return False, "no marker"
+    group, value, _ = found
+    if kind == "fixed_wait":
+        if group != "wait-ok" or value != "poll":
+            return False, "fixed wait needs 'wait-ok: poll'"
+        if index is not None and line_no not in index["loops"]:
+            return False, "'wait-ok: poll' outside a loop"
+        return True, "wait-ok: poll"
+    if group != "selector-ok":
+        return False, "selector needs 'selector-ok: ...'"
+    if value not in ("read-only", "scoped-unique"):
+        return False, f"unknown selector category {value!r}"
+    if index is None:
+        return True, f"selector-ok: {value}"
+    stmt = _smallest(index["stmts"], line_no)
+    stmt_src = stmt[2] if stmt else ""
+    if any(token in stmt_src for token in CLICK_TOKENS):
+        return False, "selector marked read-only is used to click"
+    if value == "scoped-unique":
+        func = _smallest(index["funcs"], line_no)
+        func_src = func[2] if func else ""
+        # A module-level triple-quoted JS block has no function; its whole
+        # assignment statement is the scope that must carry the guard.
+        guard_src = func_src or stmt_src
+        if not UNIQUE_GUARD_RE.search(guard_src) and not UNIQUE_GUARD_RE.search(stmt_src):
+            return False, "scoped-unique without a uniqueness guard"
+        if not SCOPED_TOKEN_RE.search(stmt_src):
+            return False, "scoped-unique without a scoped root"
+    return True, f"selector-ok: {value}"
+
+
+def _py_line_allowed(index, line_no):
+    """Only count text that lives in a real (non-docstring) string literal."""
+    if index is None:
+        return True
+    for start, end, is_doc in index["strings"]:
+        if start <= line_no <= end:
+            return not is_doc
+    return True
+
+
 def scan_tree(root: Path, *, include_tools_tests: bool = False) -> dict:
     hits = []
+    allowed_hits = []
     seed_hits = []
     dirs = list(RUNTIME_DIRS)
     if include_tools_tests:
@@ -122,13 +256,15 @@ def scan_tree(root: Path, *, include_tools_tests: bool = False) -> dict:
     for path in files:
         rel = path.relative_to(root).as_posix()
         text = read_text(path)
+        lines = text.splitlines()
         ext = path.suffix.lower().lstrip(".")
+        index = _py_index(text, lines) if ext == "py" else None
         pattern = FIXED_WAIT_PATTERNS.get(ext)
+        raw = []
         if pattern:
             for match in pattern.finditer(text):
                 line = text.count("\n", 0, match.start()) + 1
-                hits.append({"file": rel, "line": line, "kind": "fixed_wait",
-                             "text": match.group(0).strip()})
+                raw.append((line, "fixed_wait", match.group(0).strip()))
         for literal in FORBIDDEN_LITERALS:
             if literal == "Page.addScriptToEvaluateOnNewDocument" and read_only_monitor_allowed(rel, text):
                 continue
@@ -137,9 +273,7 @@ def scan_tree(root: Path, *, include_tools_tests: bool = False) -> dict:
                 idx = text.find(literal, start)
                 if idx < 0:
                     break
-                line = text.count("\n", 0, idx) + 1
-                hits.append({"file": rel, "line": line, "kind": "forbidden_literal",
-                             "text": literal})
+                raw.append((text.count("\n", 0, idx) + 1, "forbidden_literal", literal))
                 start = idx + 1
         for literal in SELECTOR_FORBIDDEN:
             start = 0
@@ -147,16 +281,24 @@ def scan_tree(root: Path, *, include_tools_tests: bool = False) -> dict:
                 idx = text.find(literal, start)
                 if idx < 0:
                     break
-                line = text.count("\n", 0, idx) + 1
-                hits.append({"file": rel, "line": line, "kind": "fuzzy_selector",
-                             "text": literal})
+                raw.append((text.count("\n", 0, idx) + 1, "fuzzy_selector", literal))
                 start = idx + 1
+        for line, kind, matched in raw:
+            if ext == "py" and not _py_line_allowed(index, line):
+                continue
+            ok, why = _marker_allows(path, index, lines, line, kind)
+            entry = {"file": rel, "line": line, "kind": kind, "text": matched}
+            if ok:
+                allowed_hits.append(dict(entry, marker=why))
+            else:
+                hits.append(dict(entry, why=why))
         if "seed_shift" in text:
             for lineno, line_text in enumerate(text.splitlines(), 1):
                 if "seed_shift" in line_text:
                     seed_hits.append({"file": rel, "line": lineno,
                                       "text": line_text.strip()})
-    return {"hits": hits, "seed_shift_hits": seed_hits, "scanned_files": len(files)}
+    return {"hits": hits, "allowed_hits": allowed_hits,
+            "seed_shift_hits": seed_hits, "scanned_files": len(files)}
 
 
 def seed_shift_allowed(hit: dict) -> bool:
@@ -183,6 +325,7 @@ def main(argv=None) -> int:
                     if h["file"].replace("\\", "/") not in SCAN_SKIP_FILES]
     verdict = {
         "runtime_hits": runtime_hits,
+        "runtime_allowed": report["allowed_hits"],
         "seed_shift_hits": report["seed_shift_hits"],
         "seed_shift_bad_consumers": bad_seed,
         "scanned_files": report["scanned_files"],

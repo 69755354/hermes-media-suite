@@ -54,7 +54,10 @@ def _read_file(url: str, offset: int):
     raw = urllib.parse.unquote(parts.path)
     if parts.netloc and parts.netloc.lower() != "localhost":
         raw = f"//{parts.netloc}{raw}"
-    path = Path(raw)
+    # Windows: ``file:///C:/x`` arrives as ``/C:/x``.  Path() then treats it as a
+    # relative path rooted at the current drive and file reads fail (or, worse,
+    # resolve somewhere else).  url2pathname applies the platform's own rule.
+    path = Path(urllib.request.url2pathname(raw))
     size = path.stat().st_size
     fh = path.open("rb")
     fh.seek(offset)

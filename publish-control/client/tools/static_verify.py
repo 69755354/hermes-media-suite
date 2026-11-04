@@ -250,8 +250,11 @@ def main() -> int:
         text = read_script_text(ROOT / "scripts" / name)
         check(f"{name} prefers the venv pythonw",
               r".venv\Scripts\pythonw.exe" in text)
-        check(f"{name} still falls back to the bundled runtime",
-              r"runtime\pythonw.exe" in text and r"runtime\python.exe" in text)
+        # 1.2.177: the bundled runtime has no playwright/pystray; falling back to
+        # it only produced a half-working agent.  The launcher must refuse
+        # instead of silently degrading, so the absence is the invariant now.
+        check(f"{name} never falls back to the bundled runtime",
+              r"runtime\pythonw.exe" not in text and r"runtime\python.exe" not in text)
         check(f"{name} sets PLAYWRIGHT_BROWSERS_PATH",
               "PLAYWRIGHT_BROWSERS_PATH" in text)
 
@@ -349,9 +352,13 @@ def main() -> int:
     check("launch never uses the customer's default profile dir",
           "--user-data-dir=C:/prof/env_1" in args
           and not any("Default" in a for a in args))
+    # The flag is one comma-separated --disable-features list, so an exact
+    # list-element comparison is the wrong probe: parse it the same way the
+    # runtime does (proc.has_disable_feature) before judging reuse safety.
+    from winport import proc as proc_mod
     check("Chrome launch disables the native external-protocol dialog",
-          "--disable-features=ExternalProtocolDialog,Translate" in args,
-          "ExternalProtocolDialog,Translate")
+          proc_mod.has_disable_feature(args, "ExternalProtocolDialog"),
+          " ".join(args))
     check("Chrome version floor is recorded", chrome_mod.MIN_CHROME_MAJOR >= 100)
 
     # ---- 1.1.0 environments ------------------------------------------------
@@ -584,9 +591,14 @@ def main() -> int:
     boot = read_script_text(scripts / "bootstrap.ps1")
     check("bootstrap.ps1 shows + writes the machine code",
           "machine-code" in boot and "机器码.txt" in boot)
-    check("bootstrap.ps1 verifies exactly 1 desktop shortcut and their targets",
-          "漫剧发布助手*.lnk" in boot and "SHORTCUT SELF-CHECK FAILED" in boot
-          and "Get-ChildItem" in boot and "$desktopLnks.Count -ne 1" in boot)
+    # 1.2.44 intentionally accepts a .cmd fallback and validates every entry it
+    # finds; the old check still demanded the pre-1.2.44 "exactly one .lnk"
+    # contract and a magic log string, so it failed a correct script.
+    check("bootstrap.ps1 verifies every desktop entry and its target",
+          "漫剧发布助手*" in boot and "Get-ChildItem" in boot
+          and "$desktopEntries.Count -lt 1" in boot
+          and "'.lnk', '.cmd'" in boot
+          and "快捷方式目标不存在" in boot)
     ms = scripts / "make-shortcut.ps1"
     if ms.exists():
         mst = read_script_text(ms)

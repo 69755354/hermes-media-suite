@@ -9,15 +9,25 @@ CTL = str(ROOT / "teamctl")
 class T(unittest.TestCase):
     def setUp(self):
         fd, self.db = tempfile.mkstemp(suffix=".db"); os.close(fd); os.remove(self.db)
-        self.env = dict(os.environ, TEAM_DB=self.db)
+        # 1.2.177: briefs/handoffs/approvals must land in a throwaway tree.  The
+        # old suite rewrote tracked files under the repository on every run.
+        self.data = tempfile.mkdtemp(prefix="team-data-")
+        self.env = dict(os.environ, TEAM_DB=self.db, TEAM_DATA=self.data,
+                        PYTHONIOENCODING="utf-8")
 
     def tearDown(self):
         for suf in ("", "-wal", "-shm"):
             p = self.db + suf
             if os.path.exists(p): os.remove(p)
+        import shutil; shutil.rmtree(self.data, ignore_errors=True)
 
     def ctl(self, *args, ok=True):
-        r = subprocess.run([CTL, *args], capture_output=True, text=True, env=self.env, cwd=str(ROOT))
+        # Windows cannot execute the extensionless script directly; run it with
+        # the same interpreter and decode explicitly instead of relying on the
+        # console code page (中文 Windows 默认 GBK 会直接抛 UnicodeDecodeError).
+        r = subprocess.run([sys.executable, CTL, *args], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=self.env, cwd=str(ROOT))
         if ok and r.returncode != 0:
             raise AssertionError(f"{args} rc={r.returncode}\n{r.stdout}\n{r.stderr}")
         return r
@@ -98,7 +108,9 @@ class T(unittest.TestCase):
         self.brief("TOPIC")
         code = ("import sys; sys.path.insert(0, %r); from teamd import engine; "
                 "engine.start('V001','TOPIC',lease_seconds=-1); print(engine.expire_leases())") % str(ROOT)
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=self.env, cwd=str(ROOT))
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=self.env, cwd=str(ROOT))
         self.assertIn("('V001', 'TOPIC')", r.stdout, r.stdout + r.stderr)
         st = self.ctl("status", "V001").stdout
         self.assertIn("心跳超时", st)

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """teamctl：团队系统的唯一入口（团长/组员都用它）。"""
-import argparse, json, pathlib, sys, time
+import argparse, json, os, pathlib, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from teamd import engine, adapters, db
 from teamd.engine import Blocked, PIPE, STAGE, ROLES
 
 ROOT = pathlib.Path(__file__).resolve().parent
+DATA_ROOT = pathlib.Path(os.environ.get("TEAM_DATA") or ROOT)
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 
 def cur_stage(tid):
@@ -59,7 +60,7 @@ def c_status(a):
 def c_brief(a):
     sid = a.stage or cur_stage(a.id)
     text = engine.brief(a.id, sid)
-    p = ROOT / "briefs" / f"{a.id}_{sid}.md"; p.parent.mkdir(exist_ok=True)
+    p = DATA_ROOT / "briefs" / f"{a.id}_{sid}.md"; p.parent.mkdir(exist_ok=True)
     p.write_text(text, encoding="utf-8")
     engine.record_brief(a.id, sid, text)
     out(str(p))
@@ -108,7 +109,7 @@ def c_events(a):
 def _dispatch_one(tid, sid, executor=None):
     """写任务书 → 开工 → 派执行器 → 收工。返回产出物路径。异常向上抛。"""
     brief = engine.brief(tid, sid)
-    bp = ROOT / "briefs" / f"{tid}_{sid}.md"; bp.parent.mkdir(exist_ok=True); bp.write_text(brief, encoding="utf-8")
+    bp = DATA_ROOT / "briefs" / f"{tid}_{sid}.md"; bp.parent.mkdir(exist_ok=True); bp.write_text(brief, encoding="utf-8")
     engine.record_brief(tid, sid, brief)
     engine.start(tid, sid, lease_seconds=CFG["lease_seconds"])
     t0 = time.time()

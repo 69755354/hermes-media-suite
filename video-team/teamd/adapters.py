@@ -20,6 +20,7 @@ def resolve_executor(raw):
     return shutil.which(raw or "") or raw or "codex_ds.sh"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+DATA_ROOT = pathlib.Path(os.environ.get("TEAM_DATA") or ROOT)
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 
 
@@ -121,7 +122,7 @@ def _review(brief, tid, sid):
 def _publish(brief, tid, sid):
     """发布=对外动作：只出待发工单，必须人工放行后由发布组执行。"""
     d = workdir(tid, sid)
-    tk = ROOT / "handoffs" / f"PUB_{tid}.md"
+    tk = DATA_ROOT / "handoffs" / f"PUB_{tid}.md"
     tk.parent.mkdir(exist_ok=True)
     art = _artifact_path(tid, "COMPOSE")
     tk.write_text(

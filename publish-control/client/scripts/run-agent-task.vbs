@@ -52,7 +52,7 @@ cmd = Chr(34) & py & Chr(34) & " -m winport --data " & Chr(34) & dataDir & Chr(3
 supervisorPid = processId()
 If supervisorPid <= 0 Then
   LogLine "Supervisor PID lookup failed; retrying once."
-  WScript.Sleep 1000
+  WScript.Sleep 1000 ' wait-ok: poll
   supervisorPid = processId()
 End If
 If supervisorPid <= 0 Then
@@ -70,7 +70,7 @@ For lockAttempt = 0 To 35
     lockAcquired = True
     Exit For
   End If
-  If lockAttempt < 35 Then WScript.Sleep 1000
+  If lockAttempt < 35 Then WScript.Sleep 1000 ' wait-ok: poll
 Next
 If Not lockAcquired Then
   LogLine "Supervisor lock unavailable after retry: " & lockDir & "; check owner PID and abandoned guard."
@@ -94,7 +94,7 @@ Do While keepGoing
     ClearCleanExit
     LogLine "Agent already running (PID " & runningPid & "); supervising and waiting for exit."
     Do While ProcessAlive(runningPid)
-      WScript.Sleep 1600 + Int(Rnd() * 800)
+      WScript.Sleep 1600 + Int(Rnd() * 800) ' wait-ok: poll
     Loop
     If CleanExitMatches("", runningPid) Then
       LogLine "Existing agent (PID " & runningPid & ") exited normally; supervisor exiting."
@@ -102,7 +102,7 @@ Do While keepGoing
       Exit Do
     End If
     LogLine "Existing agent (PID " & runningPid & ") exited without a clean-exit marker; restarting under supervision."
-    WScript.Sleep 1600 + Int(Rnd() * 800)
+    WScript.Sleep 1600 + Int(Rnd() * 800) ' wait-ok: poll
     afterLockWait = False
   End If
 
@@ -147,18 +147,18 @@ Do While keepGoing
       keepGoing = False
     Else
       LogLine "Agent exited 0 without a matching clean-exit marker; treating as a crash."
-      WScript.Sleep 60000
+      WScript.Sleep 60000 ' wait-ok: poll
       keepGoing = True
     End If
   ElseIf rc = 3 Then
     LogLine "Agent exited 3 (single-instance lock held); waiting to take over."
     waitStarted = Now
     afterLockWait = True
-    WScript.Sleep 10000
+    WScript.Sleep 10000 ' wait-ok: poll
   Else
     restartDelay = 60
     LogLine "Agent crashed (exit " & rc & "); restarting in " & restartDelay & " seconds."
-    WScript.Sleep 60000
+    WScript.Sleep 60000 ' wait-ok: poll
     keepGoing = True
   End If
 Loop
@@ -436,7 +436,7 @@ Function processId()
     Exit Function
   End If
   childPid = CLng(exec.ProcessID)
-  WScript.Sleep 100
+  WScript.Sleep 100 ' wait-ok: poll
   Set wmi = GetObject("winmgmts:\\.\root\cimv2")
   Set procs = wmi.ExecQuery("SELECT ProcessId, ParentProcessId FROM Win32_Process WHERE ProcessId=" & childPid)
   For Each proc In procs

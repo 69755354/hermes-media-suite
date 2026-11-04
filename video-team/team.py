@@ -4,11 +4,14 @@
 import json, os, sys, time, argparse, pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent
-BOARD = ROOT / "board.json"
+# 1.2.177: data (board/briefs/handoffs) must be redirectable so tests never
+# rewrite tracked files inside the repository.
+DATA_ROOT = pathlib.Path(os.environ.get("TEAM_DATA") or ROOT)
+BOARD = DATA_ROOT / "board.json"
 PIPE = json.loads((ROOT / "pipeline.json").read_text(encoding="utf-8"))["stages"]
 ROLES = json.loads((ROOT / "roles.json").read_text(encoding="utf-8"))
 STAGE = {s["id"]: s for s in PIPE}
-HANDOFF = ROOT / "handoffs"
+HANDOFF = DATA_ROOT / "handoffs"
 HANDOFF.mkdir(exist_ok=True)
 
 def load():
@@ -158,7 +161,7 @@ def cmd_next(a):
         st = STAGE[t["stage"]]
         print(f"{t['id']} {st['name']} {ROLES[st['owner']]['name']} {t['title']}")
 
-BRIEFS = ROOT / "briefs"; BRIEFS.mkdir(exist_ok=True)
+BRIEFS = DATA_ROOT / "briefs"; BRIEFS.mkdir(exist_ok=True)
 
 def cmd_brief(a):
     b = load(); t = find(b, a.id); st = STAGE[t["stage"]]

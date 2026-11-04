@@ -236,9 +236,16 @@ def case_M5_enqueue(tmp: Path):
 
 def _plan():
     piece = {"title": "标题", "copy_body": "文案", "sha256": "a" * 64}
-    return {"plan_id": "PLAN-SV", "account_id": "env_1:douyin",
+    account_id = "env_1:douyin"
+    # 1.2.177: the fixture used a literal "abc123" that no longer matched the
+    # material fingerprint the approval gate recomputes.  F6/F9 were therefore
+    # rejected at the approval step ("plan content changed") before they ever
+    # reached the ledger, so the idempotency claim was never actually tested.
+    from winport.idempotency import material_fingerprint
+    return {"plan_id": "PLAN-SV", "account_id": account_id,
             "schedule_at": "2026-10-20T12:00:00+08:00", "piece": piece,
-            "compliance": {"content_hash": "abc123"}}
+            "compliance": {"content_hash": material_fingerprint(
+                piece, account_id=account_id)}}
 
 
 def case_M6_publish(tmp: Path):
@@ -410,6 +417,64 @@ def case_F5_login_drop(tmp: Path):
                  f"{rows[0]['status']} - {rows[0]['reason']}\n提醒: {seen[0]}", ok)
 
 
+class _SimAttempt:
+    """The upload attempt a real driver exposes before the submit click."""
+
+    def __init__(self, attempt_id, creation_id, video_id):
+        self.attempt_id = attempt_id
+        self.creation_id = creation_id
+        self.video_id = video_id
+
+
+class _ReceiptDriver:
+    """Simulated driver that speaks the full submit contract.
+
+    1.2.177: F6/F9 used a bare NullDriver, so there was no attempt id, no
+    creation/video binding and no create_v2 receipt.  The ledger correctly
+    refused to promote anything to CONSUMED, which meant the idempotency claim
+    was never exercised.  This double performs the same three callbacks a real
+    publish does (bind_submission -> click -> receipt) so the ledger's real
+    atomic path runs.
+    """
+
+    simulated = True
+
+    def __init__(self, work_id, attempt_id="ATT-0001", creation_id="CR-1",
+                 video_id="VD-1"):
+        self.calls = []
+        self.platform_work_id = work_id
+        self.upload_attempt = _SimAttempt(attempt_id, creation_id, video_id)
+        self.bind_submission = None
+        self.last_publish_evidence = None
+
+    def fill(self, plan):
+        self.calls.append(("fill", plan.get("plan_id")))
+
+    def click_publish(self, plan):
+        self.calls.append(("click_publish", plan.get("plan_id")))
+        attempt = self.upload_attempt
+        if callable(self.bind_submission):
+            self.bind_submission(attempt.creation_id, attempt.video_id)
+        self.last_publish_evidence = {
+            "ok": True, "signal": "create_v2_status_ok",
+            "receipt": {"status": 200, "status_code": 0,
+                        "item_id": self.platform_work_id,
+                        "work_id": self.platform_work_id,
+                        "result": "SUCCESS",
+                        "attempt_id": attempt.attempt_id,
+                        "creation_id": attempt.creation_id,
+                        "video_id": attempt.video_id,
+                        "source": "playwright_response"}}
+
+    def read_back_work_id(self, plan):
+        self.calls.append(("read_back", plan.get("plan_id")))
+        return self.platform_work_id
+
+
+def _sim_driver(work_id):
+    return _ReceiptDriver(work_id)
+
+
 def case_F6_hardkill_idempotent(tmp: Path):
     layout = new_layout(tmp, "f6")
     seed_config(layout)
@@ -418,14 +483,14 @@ def case_F6_hardkill_idempotent(tmp: Path):
     _pub = devsign.publickey(_seed)
     receipt = issue_receipt_for_test(_seed, plan)
     ledger = Stage2Ledger(layout.stage2_ledger)
-    first = run_publish(plan, NullDriver(platform_work_id="W9"), ledger,
+    first = run_publish(plan, _sim_driver("7412345678901234567"), ledger,
                         mode=MODE_APPROVED, canary_armed=True,
                         post_fill_green=True, receipt=receipt,
                         verify_key=_pub, allow_simulated=True)
     # simulate hard kill right after submit: a fresh process re-reads the ledger
     reloaded = Stage2Ledger(layout.stage2_ledger)
     try:
-        again = run_publish(plan, NullDriver(platform_work_id="W9b"), reloaded,
+        again = run_publish(plan, _sim_driver("7412345678901234568"), reloaded,
                             mode=MODE_APPROVED, canary_armed=True,
                             post_fill_green=True, receipt=receipt,
                             verify_key=_pub, allow_simulated=True)
@@ -512,7 +577,7 @@ def case_F9_concurrency(tmp: Path):
     def worker():
         try:
             led = Stage2Ledger(layout.stage2_ledger)
-            results.append(run_publish(plan, NullDriver(platform_work_id="W"), led,
+            results.append(run_publish(plan, _sim_driver("7412345678901234569"), led,
                                        mode=MODE_APPROVED, canary_armed=True,
                                        post_fill_green=True, receipt=receipt,
                                        verify_key=_pub, allow_simulated=True))
@@ -544,9 +609,21 @@ def case_F10_single_instance(tmp: Path):
     fake = tmp / "fake" / "chrome.exe"
     fake.parent.mkdir(parents=True, exist_ok=True)
     fake.write_bytes(b"MZ")
+    # A live 1.2.16x+ window always carries the dialog guard; the fixture used to
+    # omit it, so the reuse path correctly saw a stale pre-1.2.23 process and
+    # F10 never exercised the reuse branch it was written for.
     procs = [{"pid": 4242, "name": "chrome.exe",
-              "cmdline": f'chrome.exe --user-data-dir={profile} '
-                         f'--remote-debugging-port=9224'}]
+              "cmdline": f'{fake} --user-data-dir={profile} '
+                         f'--remote-debugging-port=9224 '
+                         f'--disable-features=ExternalProtocolDialog,Translate'}]
+    # 1.2.177: reuse is proven from the launch marker + the live socket table.
+    # The fixture provided neither, so F10 could only ever see MARKER_MISSING.
+    from winport import jsonio, proc as proc_mod
+    jsonio.write_json(layout.env_lease_dir / f"{ch.env_id}.launch.json", {
+        "dialog_guard": chrome.DIALOG_GUARD_FEATURE,
+        "profile": str(profile), "debug_port": 9224, "pid": 4242})
+    original_owners = proc_mod.listening_pids
+    proc_mod.listening_pids = lambda port, **kw: {4242}
     original = chrome.port_open
     chrome.port_open = lambda *a, **k: True
     try:
@@ -559,6 +636,7 @@ def case_F10_single_instance(tmp: Path):
         refuse = open_channel(layout, ch, processes=procs, chrome_path=str(fake))
     finally:
         chrome.port_open = original
+        proc_mod.listening_pids = original_owners
     ok = reuse["opened"] and reuse["reason"] == "REUSED_ENV_WINDOW" \
         and (not refuse["opened"]) and refuse["reason"] == "PROFILE_IN_USE"
     record("F10", "失败路径：同一环境不许第二个实例", "fail",
