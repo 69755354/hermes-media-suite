@@ -11,8 +11,12 @@ r"""Operator CLI for the customer-machine remote channel.
 import argparse, base64, json, os, sqlite3, sys, time, urllib.request
 
 BASE = os.environ.get("CONTROL_URL", "http://127.0.0.1:18977").rstrip("/")
-ENV = "/home/ubuntu/workflow/projects/publish_control/.env"
-DB = "/home/ubuntu/workflow/projects/publish_control/control.db"
+ROOT = os.environ.get(
+    "PUBLISH_CONTROL_HOME",
+    "/home/ubuntu/workflow/projects/publish_control",
+)
+ENV = os.path.join(ROOT, ".env")
+DB = os.path.join(ROOT, "control.db")
 
 
 def admin_token():

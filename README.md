@@ -17,6 +17,33 @@
 
 ---
 
+## 门禁脚本与运行依赖
+
+`scripts/` 是工作流的统一门禁入口，规则表在 `wiki/spec/`。
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/workflow_gate.py` | 统一入口：`status / check / approve` |
+| `scripts/workflow_ticket.py` | 节点票据：`open / close / skip / status / classify` |
+| `scripts/confirm_gate.py` | 客户确认门兼容适配器 |
+| `scripts/review_gate.py` | 评审门适配器（初稿/预检/终审） |
+| `scripts/data_source_gate.py` | 入口合规与知识库引用检查 |
+| `scripts/codex_preload_manifest.py` | 节点预读清单 | 
+| `scripts/director_review_scorer.py` | 导演意图四维评分 |
+| `scripts/industry_kb_map.py`、`scripts/update_state.py` | 上述脚本的依赖 |
+
+路径解析：默认以仓库根为根；可用 `WORKFLOW_HOME`、`HERMES_HOME`、`WORKFLOW_GUARD_DIR`、`WORKFLOW_TICKETS_DIR`、`HERMES_CONFIG` 覆盖。`HERMES_NODE_MAP.yaml` 里的旧机绝对路径会按当前根自动重映射。
+
+运行依赖：`wiki/concepts/*`（行业知识库）与 `skills/*`（方法论 skill）属于运行数据，不在本仓库；缺失时门禁 fail-closed，并输出缺哪一份文件。
+
+冒烟测试（不需要生产目录，验证适配器齐全、可执行、路径可重定位）：
+
+```bash
+python3 scripts/test_gate_chain.py
+```
+
+---
+
 ## 1. publish-control · 自动发布
 
 把「飞书里说一句话」变成「抖音创作者中心里真的发出去一条视频」，全链路可留证、可冻结、可人工接管。

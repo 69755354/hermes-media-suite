@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """控制面远程助手：rc.py ping|ls <path>|read <path>|exec <cmd...>"""
 import json,sys,time,urllib.request,os
-ROOT='/home/ubuntu/workflow/projects/publish_control'
+ROOT=os.environ.get('PUBLISH_CONTROL_HOME','/home/ubuntu/workflow/projects/publish_control')
 def env(k):
     for line in open(os.path.join(ROOT,'.env'),encoding='utf-8'):
         if line.startswith(k+'='): return line.split('=',1)[1].strip()

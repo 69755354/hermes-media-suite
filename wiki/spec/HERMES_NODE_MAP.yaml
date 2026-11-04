@@ -1,0 +1,1165 @@
+# HERMES_NODE_MAP.yaml — 五轨节点单一事实源
+# 契约定位：L1 层。L0 框架层 SOUL 只认 <TRACK>.<NODE_ID>，业务细节全部落在本表与 L2 persona 文件。
+# 下游读取方（本表即两者的唯一输入契约，改字段等于改契约，须同步改两处）：
+#   1. /home/ubuntu/workflow/scripts/workflow_ticket.py   —— open/close/skip/status/classify
+#   2. /home/ubuntu/.hermes/guard/node-entry-guard.py     —— pre_tool_call 进程级阻断，生成 block message 时调 classify
+# 存量零改：huoshan SKILL.md（3595 行）、WORKFLOW_REGISTRY.yaml、小鹿 SOUL 16 节点表一律不动，
+#   本表只加 legacy_ref / registry_ref 回指。新增即映射，不迁移。
+# 依据：outputs/SOUL框架层改造方案_20260815.md §3（节点表）/§4.2（票据物理动作）/§5（三态）/§6.1（映射层字段形态）
+
+meta:
+  version: '1.0'
+  update_date: '2026-08-15'
+  note: >-
+    五轨节点映射表。节点 ID 统一命名空间 <TRACK>.<NODE_ID>，全语义 ID，禁纯数字；
+    数字仅允许出现在 legacy_ref 字符串内作回指。T-CONTENT 复用 huoshan 0–17 原编号不重排，
+    T-OPS 沿用 WORKFLOW_REGISTRY 语义 ID 不新造。本表不新建任何内容门，
+    T-CONTENT/T-OPS 出口闸一律委托既有门禁脚本。
+
+  # 路径约定（下游脚本按此解析，不要自行猜测）
+  path_roots:
+    repo_root: /home/ubuntu/workflow          # persona 字段相对此根解析
+    hermes_root: /home/ubuntu/.hermes         # guard / skills / scripts 所在
+    persona_path_style: relative_to_repo_root # 与 §6.1 示例一致
+    deps_path_style: absolute                 # deps 一律绝对路径，open 时逐个 os.path.isfile + size>0 校验
+
+  # 字段字典（缺一不可的 8 个必填字段 + 3 个契约扩展字段）
+  field_contract:
+    required:
+      - name           # 中文名
+      - persona        # persona 文件路径（相对 repo_root）
+      - deps           # 必读文档清单，绝对路径，open 时逐个校验存在且非空，缺一 rc=1
+      - requires       # 上游节点 ID 全限定列表，用于 open 的顺序校验；[] 表示链首
+      - exit_gate      # 出口闸：ticket_close / workflow_gate.py:G_XXX / review_gate.py:xxx / api-guard.sh / 组合
+      - output_class   # internal_intermediate | internal_final | external_delivery
+      - triggers       # 触发词列表，供 classify 打分
+    backref_one_of:
+      - legacy_ref     # 回指 huoshan 存量编号，如 "huoshan#节点2"
+      - registry_ref   # 回指 WORKFLOW_REGISTRY 语义 ID，如 "TOPIC_EXPERIMENT"
+      - none_new       # 新建轨节点无存量可回指，显式写 none_new: true，禁留空
+    extensions:
+      persona_status:  # ready | pending_create
+        why: >-
+          新增 persona 共 16 个尚未落盘（8–9 个编排/决策类 + 7 个运营类）。open 的物理动作第 4 步要把
+          persona 全文打进上下文，文件不存在会直接 rc=1 把整轨锁死。故 pending_create 的节点
+          open 时输出 `NEED_INFO: persona 未建 <path>` 并 rc=1，与"文件损坏"区分开，便于定位。
+          persona 落盘后把本字段改 ready 即可，无需改 guard。
+      client_view_export:  # 该节点产物存在客户可见视图（D_*），导出动作单独走对外交付态
+        why: >-
+          WORKFLOW_REGISTRY 里 client_view: D_* 的产物，A_* 本体是内部件、D_* 才是客户件。
+          节点 output_class 按 A_* 本体判，导出 D_* 是独立的 OUTBOUND 动作，必须过脱敏 + feishu_send_gate.py。
+          不把这些节点整体标 external_delivery，避免内部中间件被无谓脱敏。
+      artifact_format_checks:  # close 时的格式硬校验项，对齐 AGENTS.md 产出物格式铁律
+        why: 票据 close 只管 workflow_gate 不管的四件事之一——产物格式，规则集中在此，不散落 SOUL。
+
+  # 轨级灰度开关（Phase 3 分轨转 enforce 用，不一刀切；对齐方案 §8.1 风险 R4 的回退粒度）
+  # observe = guard 只记日志不阻断；enforce = 阻断生效。改这里不需要改 guard 代码。
+  mode_default: observe
+
+  status_codes:  # 只认这五种，禁自创
+    - "OUTPUT:"
+    - "BLOCKED:"
+    - "MANUAL_REVIEW_REQUIRED:"   # rc=3，禁记 ALLOWED，禁向下游给获批哈希
+    - "NEED_INFO:"
+    - "COMPLIANCE:"
+
+  known_blockers:
+    - id: workflow_gate_no_approve
+      detail: >-
+        workflow_gate.py 当前只有 check/status，无 approve 子命令，19 门中 17 门 manual: true，
+        可达 ALLOWED 的门为 0。T-OPS 全轨与 T-CONTENT 的 COPY/STORYBOARD/QC/DELIVER 出口闸都委托它，
+        不先补 approve 通道则这些节点 close 后下游 open 必然 rc=3 死锁。
+      hard_prerequisite: Phase 0-A（给 workflow_gate.py 补 approve <proj> <gate_id> --by --evidence）
+      affects: [T-OPS.*, T-CONTENT.COPY, T-CONTENT.STORYBOARD, T-CONTENT.IMAGE_GEN, T-CONTENT.QC, T-CONTENT.DELIVER]
+    - id: long_form_writing_quality_skill_missing
+      detail: >-
+        AGENTS.md 要求长篇/小说任务加载 newmedia-operations/long-form-writing-quality/SKILL.md，
+        但该文件当前不在盘上。故本表任何节点的 deps 都未引用它——引用即 open 必 rc=1。
+        补齐该 skill 后再挂进 T-CONTENT.COPY 的 deps。
+
+# =====================================================================
+# 五轨
+# =====================================================================
+tracks:
+
+  # -------------------------------------------------------------------
+  # T-CONTENT｜内容生产轨（映射 huoshan 0–17，零改存量）
+  # 编号不重排：legacy_ref 回指 huoshan#节点N，本表 ID 全语义化。
+  # 物理底线（huoshan 纸面铁律物理化，由闸一 TERMINAL 分支执行）：
+  #   Bot 域节点（INFO_COLLECT…STORYBOARD）禁直连 Helper API(1888)/Seedance/Seedream/婵镜/火山 ARK，
+  #   一切渲染 POST /execute(1889)。唯一例外：段1 经 Helper API /seedream 生图合法。
+  # -------------------------------------------------------------------
+  T-CONTENT:
+    source: huoshan
+    source_ref: /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/SKILL.md
+    mode: observe
+    note: >-
+      修正一处存量不一致：huoshan 表把节点 7/13/16 标为「无独立人设」，但
+      persona-material-collector.md / persona-post-editor.md / persona-publish-specialist.md
+      实际存在。本表按文件实际存在挂上，不再走「框架默认规范」。存量表不改。
+    nodes:
+
+      INFO_COLLECT:
+        name: 信息采集
+        legacy_ref: "huoshan#节点0"
+        persona: wiki/personas/persona-info-collector.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+        requires: []
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["信息采集", "客户资料", "建档", "新客户", "回头客", "门店信息"]
+        artifact_format_checks: [executor_tag, assets_copied_to_project]
+
+      USER_ANALYSIS:
+        name: 用户分析
+        legacy_ref: "huoshan#节点1"
+        persona: wiki/personas/persona-user-analyst.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/human-drivers-library.md
+          - /home/ubuntu/workflow/wiki/concepts/consumer-decision-models-knowledge.md
+          - /home/ubuntu/workflow/wiki/concepts/behavioral-economics-marketing.md
+          - /home/ubuntu/workflow/wiki/concepts/china-consumer-sociology.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-CONTENT.INFO_COLLECT]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["用户分析", "用户画像", "受众", "共情", "人性驱动力", "底层焦虑"]
+        artifact_format_checks: [executor_tag, empathy_six_layers_present]
+
+      DECONSTRUCT:
+        name: 爆款拆解
+        legacy_ref: "huoshan#节点2"
+        persona: wiki/personas/persona-content-analyst.md
+        persona_status: ready
+        # 硬要求：video-deconstruction-framework.md 必须在 deps 里，缺则 open rc=1（方案 §4.2 第 5 步点名）
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/video-deconstruction-framework.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/data-sourcing-strategy.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-CONTENT.USER_ANALYSIS]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["拆解", "爆款", "对标", "为什么爆", "逐帧", "帧级", "同类内容", "标杆"]
+        artifact_format_checks: [executor_tag, data_source_cited, no_fabricated_metrics]
+
+      TOPIC:
+        name: 选题
+        legacy_ref: "huoshan#节点3"
+        persona: wiki/personas/persona-strategy-editor.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/50-viral-hook-templates.md
+          - /home/ubuntu/workflow/wiki/concepts/golden-3-seconds.md
+          - /home/ubuntu/workflow/wiki/concepts/copywriting-spec.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-review-gate/SKILL.md
+        requires: [T-CONTENT.DECONSTRUCT]
+        exit_gate: "review_gate.py:node3_candidate"
+        output_class: internal_intermediate
+        triggers: ["选题", "拍什么", "题材", "内容方向", "选题实验"]
+        artifact_format_checks: [executor_tag, candidate_count_ge_3, scored]
+
+      COPY:
+        name: 文案·纯台词本
+        legacy_ref: "huoshan#节点4"
+        persona: wiki/personas/persona-creative-director.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/emotion-psychology.md
+          - /home/ubuntu/workflow/wiki/concepts/entity-store-30s-conversion-script-template.md
+          - /home/ubuntu/workflow/wiki/concepts/copywriting-spec.md
+          - /home/ubuntu/workflow/wiki/concepts/six-oral-styles.md
+          - /home/ubuntu/workflow/wiki/concepts/xiaohongshu-title-and-copy-templates.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-strategy-overview.md
+          - /home/ubuntu/workflow/wiki/concepts/compliance-checklist.md
+          - /home/ubuntu/workflow/wiki/concepts/compliance-platform-rules.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-review-gate/SKILL.md
+        requires: [T-CONTENT.TOPIC]
+        exit_gate: "workflow_gate.py:G_COPY_READY"
+        output_class: internal_intermediate
+        # 铁律：纯台词本只有台词。情绪/说话人/语气归 STORYBOARD，不许混进来。
+        triggers: ["文案", "台词本", "口播", "脚本", "写文案", "改文案"]
+        artifact_format_checks:
+          - executor_tag
+          - no_table            # 禁表格
+          - no_shot_number      # 禁镜号
+          - no_speaker_label    # 禁说话人/语气/情绪
+          - three_versions_present
+          - blind_review_top_score_ge_60
+
+      STORYBOARD:
+        name: 分镜脚本
+        legacy_ref: "huoshan#节点5"
+        persona: wiki/personas/persona-storyboard-artist.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/shotcraft-templates.md
+          - /home/ubuntu/workflow/wiki/concepts/xiaolu-character-sheet.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/video-production/SKILL.md
+        requires: [T-CONTENT.COPY]
+        exit_gate: "workflow_gate.py:G_CREATIVE_READY"
+        output_class: internal_intermediate
+        triggers: ["分镜", "镜号", "运镜", "景别", "镜头", "分镜表"]
+        artifact_format_checks:
+          - executor_tag
+          - eight_columns            # 8 列分镜表
+          - talking_head_segments_min_le_15s # 口播分段：快乐马r2v单段3-15秒；能一段出完不拆、段数取最小；同段可多角色/多镜头，禁止一句一段
+          - no_fast_speech_prompt    # 禁「语速快」，一律「语速适中，吐字清晰」
+          - total_duration_within_tolerance
+
+      CHAR_DESIGN:
+        name: 视觉人设
+        legacy_ref: "huoshan#节点6"
+        persona: wiki/personas/persona-character-designer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/ai-short-drama-workflow-merged.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/ai-image-gen-strategy/SKILL.md
+        # 与 STORYBOARD 并行（互不依赖），同挂 COPY 之后
+        requires: [T-CONTENT.COPY]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["视觉人设", "人设稿", "角色设计", "形象统一", "锁脸"]
+        artifact_format_checks: [executor_tag, appearance_locked_fields]
+
+      ASSET_SUM_A:
+        name: 素材汇总A
+        legacy_ref: "huoshan#节点7"
+        persona: wiki/personas/persona-material-collector.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/relay-document-template.md
+        # 等 5+6 双签收
+        requires: [T-CONTENT.STORYBOARD, T-CONTENT.CHAR_DESIGN]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["素材汇总", "素材清单", "素材齐不齐"]
+        artifact_format_checks: [executor_tag, asset_usage_mapped_per_shot]
+
+      IMAGE_GEN:
+        name: Seedream 生图
+        legacy_ref: "huoshan#节点8"
+        persona: wiki/personas/persona-ai-painter.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/seedream-realistic-portrait-guide.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/five-layer-prompt-structure.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/volcano-bypass-three-view-format.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/ai-image-gen-strategy/SKILL.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/cost-reference.md
+        requires: [T-CONTENT.ASSET_SUM_A]
+        exit_gate: "api-guard.sh:check + workflow_gate.py:G_RENDER_READY"
+        output_class: internal_intermediate
+        triggers: ["生图", "Seedream", "三视图", "彩铅", "配图", "出图"]
+        artifact_format_checks: [executor_tag, local_file_exists, three_view_structure]
+
+      ASSET_SUM_B:
+        name: 素材汇总B
+        legacy_ref: "huoshan#节点9"
+        # 复用 material-collector（存量标「框架执行」，本表按文件实际存在挂上）
+        persona: wiki/personas/persona-material-collector.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/relay-document-template.md
+        requires: [T-CONTENT.IMAGE_GEN]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["素材汇总B", "图片清单", "参考图归档"]
+        artifact_format_checks: [executor_tag, absolute_paths_only]
+
+      PROMPT:
+        name: 提示词
+        legacy_ref: "huoshan#节点10"
+        persona: wiki/personas/persona-prompt-engineer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/img2img-template.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-director-prompt-dual-system.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-prompt-template-library.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-prompt-enhancement.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-2.0-prompt-formula.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/maicai-prompt-structure.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/maiya-seedance-prompt-style.md
+          - /home/ubuntu/workflow/wiki/concepts/seven-pitfalls.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/video-production/SKILL.md
+        requires: [T-CONTENT.ASSET_SUM_B]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["提示词", "prompt", "四层结构", "图生图", "逐镜提示词"]
+        artifact_format_checks:
+          - executor_tag
+          - per_shot_ref_expanded    # 每镜必须实际展开 @图1/@图2，禁「同上」「沿用前镜」
+          - ref_abs_path_bound       # @图1/@图2 绑定真实绝对路径并注明仅作人物/场景参考
+          - character_scene_lock_per_shot
+          - no_fast_speech_prompt
+
+      PROMPT_QC:
+        name: 提示词质检
+        legacy_ref: "huoshan#节点11"
+        persona: wiki/personas/persona-compliance-auditor.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/seedance-director-prompt-dual-system.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-prompt-template-library.md
+          - /home/ubuntu/workflow/wiki/concepts/seedance-2.0-prompt-formula.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/five-layer-prompt-structure.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+        requires: [T-CONTENT.PROMPT]
+        exit_gate: "review_gate.py:node12_pre"
+        output_class: internal_intermediate
+        triggers: ["提示词质检", "质检", "逐条对照", "预检"]
+        artifact_format_checks: [executor_tag, checklist_item_by_item]
+
+      RENDER:
+        name: Seedance 视频
+        legacy_ref: "huoshan#节点12"
+        persona: wiki/personas/persona-render-engineer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/seedance-api-format.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/api-contract.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/cost-reference.md
+        requires: [T-CONTENT.PROMPT_QC]
+        exit_gate: "api-guard.sh:check + security-middleware.py"
+        output_class: internal_intermediate
+        triggers: ["渲染", "Seedance", "出片", "生成视频", "跑视频"]
+        artifact_format_checks: [executor_tag, local_file_exists, cost_recorded]
+
+      COMPOSE:
+        name: ffmpeg 合成+BGM+字幕
+        legacy_ref: "huoshan#节点13"
+        persona: wiki/personas/persona-post-editor.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/ffmpeg-synthesis-guide.md
+          - /home/ubuntu/workflow/wiki/concepts/bgm-library.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/ambient-sound-techniques.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/subtitle-and-audio-synthesis.md
+        requires: [T-CONTENT.RENDER]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["合成", "ffmpeg", "配乐", "BGM", "字幕", "环境音", "成片"]
+        artifact_format_checks: [executor_tag, local_file_exists]  # 产物必须为 local_file，不接受描述
+
+      QC:
+        name: 视频最终检验
+        legacy_ref: "huoshan#节点14"
+        persona: wiki/personas/persona-qc-inspector.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/content-verification-protocol.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-review-gate/SKILL.md
+        requires: [T-CONTENT.COMPOSE]
+        exit_gate: "workflow_gate.py:G_TECHNICAL_QC_PASS"
+        output_class: internal_intermediate
+        triggers: ["质检", "验片", "最终检验", "过检"]
+        artifact_format_checks: [executor_tag, four_dimension_review]
+
+      DELIVER:
+        name: 交付
+        legacy_ref: "huoshan#节点15"
+        persona: wiki/personas/persona-operation.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/content-verification-protocol.md
+          - /home/ubuntu/workflow/wiki/strategies/douyin-kuaishou-publishing-strategy.md
+          - /home/ubuntu/workflow/wiki/strategies/xiaohongshu-publishing-strategy.md
+          - /home/ubuntu/workflow/wiki/strategies/zhihu-wechat-video-publishing-strategy.md
+          - /home/ubuntu/workflow/wiki/strategies/wechat-video-content-strategy.md
+          - /home/ubuntu/workflow/wiki/strategies/wechat-public-account-strategy.md
+        requires: [T-CONTENT.QC]
+        exit_gate: "workflow_gate.py:G_DELIVERY_READY + feishu_send_gate.py"
+        output_class: external_delivery
+        triggers: ["交付", "发客户", "给客户", "对外", "发出去", "打包交付"]
+        artifact_format_checks: [executor_tag, desensitized, link_on_own_line]
+
+      PUBLISH:
+        name: 发布指引与发布策略
+        legacy_ref: "huoshan#节点16"
+        persona: wiki/personas/persona-publish-specialist.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/platform-publishing-guide.md
+          - /home/ubuntu/workflow/wiki/spec/templates/publish_strategy_template_v1.md
+          - /home/ubuntu/workflow/wiki/concepts/account-staged-operations-library.md
+        requires: [T-CONTENT.DELIVER]
+        exit_gate: "permission_gate.py"
+        output_class: external_delivery
+        # 2026-08-04 定案：验证期不搞自动发布，客户手动发，我们给指引
+        triggers: ["发布", "发布指引", "发布策略", "上线", "排期发"]
+        artifact_format_checks: [executor_tag, desensitized, three_deliverables_present]
+
+      RETRO:
+        name: 数据复盘
+        legacy_ref: "huoshan#节点17"
+        persona: wiki/personas/persona-review-optimizer.md
+        persona_status: ready
+        persona_secondary: wiki/personas/persona-data-analyst.md
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/data-review-template.md
+          - /home/ubuntu/workflow/wiki/concepts/xiaohongshu-ces-algorithm.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/douyin-creator-center-qr-login.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/optimization-tips.md
+        requires: [T-CONTENT.PUBLISH]
+        exit_gate: ticket_close
+        output_class: internal_final
+        triggers: ["复盘", "数据复盘", "回顾", "为什么没爆", "优化建议"]
+        artifact_format_checks: [executor_tag, real_data_source, landed_in_wiki_cases]
+
+  # -------------------------------------------------------------------
+  # T-ORCHESTRA｜多执行器指挥与审核裁决轨（新建）
+  # 分派档位直引 AGENT_DIVISION_SPEC.md：L0 单代理端到端 / L1 事实勘探→契约→实现→独立复核 / L2 快照+dry-run+人签字。
+  # 硬规则：实现与终审不同 owner——CC 不终审自己所审的实现，codex 不自行终审。
+  # -------------------------------------------------------------------
+  T-ORCHESTRA:
+    source: 新建
+    source_ref: /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+    mode: observe
+    nodes:
+
+      INTAKE:
+        name: 需求受理与分轨判定
+        none_new: true
+        persona: wiki/personas/persona-dispatch-router.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+          - /home/ubuntu/workflow/wiki/spec/HERMES_NODE_MAP.yaml
+          - /home/ubuntu/.hermes/skills/thinking/workflow-first-discipline/SKILL.md
+        requires: []
+        exit_gate: ticket_close   # open 自带判定，close 落一行分轨结论
+        output_class: internal_intermediate
+        triggers: ["受理", "这活怎么分", "走哪条轨", "派给谁", "分轨"]
+        artifact_format_checks: [executor_tag, track_and_state_line_present]
+
+      PACKAGE:
+        name: 上下文打包（角色+背景+硬约束+裁决点+产出要求）
+        none_new: true
+        persona: wiki/personas/persona-brief-packager.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+          - /home/ubuntu/.hermes/skills/thinking/executor-orchestration/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/multi-executor-orchestration/SKILL.md
+        requires: [T-ORCHESTRA.INTAKE]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["打包", "简报", "上下文打包", "写任务书", "brief"]
+        # 出口闸语义：简报五段齐全校验
+        artifact_format_checks:
+          - executor_tag
+          - brief_five_sections    # 角色/背景/硬约束/裁决点/产出要求，缺一 BLOCKED
+          - mandatory_reading_listed
+
+      DISPATCH:
+        name: 执行器分派（codex/claude/DS）
+        none_new: true
+        persona: wiki/personas/persona-dispatch-router.md   # 框架执行，复用 INTAKE 人设不新建
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+          - /home/ubuntu/.hermes/skills/thinking/model-provider-diagnostics/SKILL.md
+        requires: [T-ORCHESTRA.PACKAGE]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["分派", "派活", "给codex", "给claude", "降级DS", "容灾"]
+        # 出口闸语义：AGENT_DIVISION_SPEC L0/L1/L2 档位校验；DS 降级产物必须可识别可回滚
+        artifact_format_checks:
+          - executor_tag
+          - tier_declared          # 必须显式写 L0/L1/L2
+          - owner_separation       # 实现 owner ≠ 终审 owner
+          - degraded_output_marked # 走 DS 降级时必须标记
+
+      CROSS_REVIEW:
+        name: 双执行器互评收敛
+        none_new: true
+        persona: wiki/personas/persona-cross-reviewer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/dual-executor-consensus/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/multi-executor-convergence/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/multi-agent-consensus/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+        requires: [T-ORCHESTRA.DISPATCH]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["互评", "交叉复核", "一致率", "收敛", "双执行器"]
+        # 出口闸语义：两份互评文件均存在且标注执行者，一致率 ≥90%
+        artifact_format_checks:
+          - executor_tag
+          - two_review_files_present
+          - consensus_rate_ge_90
+
+      ADJUDICATE:
+        name: 终审裁决（六顶帽子+第一性+忠实度）
+        none_new: true
+        persona: wiki/personas/persona-chief-adjudicator.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/decision-framework/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/multi-agent-convergence/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+        requires: [T-ORCHESTRA.CROSS_REVIEW]
+        exit_gate: ticket_close
+        output_class: internal_final
+        triggers: ["终审", "裁决", "定稿", "拍板", "谁对"]
+        # 出口闸语义：裁决书四项齐全（结论/依据/风险/行动）
+        artifact_format_checks:
+          - executor_tag
+          - adjudication_four_items
+          - reviewer_not_implementer   # 终审 owner 不得等于被审实现的 owner
+
+  # -------------------------------------------------------------------
+  # T-ATTRIBUTION｜星广归因系统轨（新建，当前重点）
+  # 项目上下文（业务模式/账号/分成/第一性/数字资产定位）从 SOUL 移出，落 projects/xingguang-attribution/BRIEF.md，
+  # 由票据 open 时打印。⚠️ 该 BRIEF 与项目目录当前尚未创建 —— 首次 open 前必须先建，否则 rc=1。
+  # -------------------------------------------------------------------
+  T-ATTRIBUTION:
+    source: 新建
+    project_brief: projects/xingguang-attribution/BRIEF.md
+    project_brief_status: pending_create
+    mode: observe
+    nodes:
+
+      BUSINESS:
+        name: 业务描述→条件背景→业务流程
+        none_new: true
+        persona: wiki/personas/persona-business-analyst.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/systematic-thinking/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/monetization-first-principle/SKILL.md
+        requires: []
+        exit_gate: manual_confirm   # 逐层人工确认，返回 rc=3 → MANUAL_REVIEW_REQUIRED
+        output_class: internal_intermediate
+        triggers: ["业务描述", "条件背景", "业务流程", "星广", "归因业务"]
+        artifact_format_checks: [executor_tag, three_layers_present]
+
+      ARCH:
+        name: 系统架构
+        none_new: true
+        persona: wiki/personas/persona-system-architect.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/systematic-thinking/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+        requires: [T-ATTRIBUTION.BUSINESS]   # 出口闸语义：上层已确认
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["系统架构", "架构图", "模块划分", "技术选型"]
+        artifact_format_checks: [executor_tag, upstream_confirmed]
+
+      LOGIC:
+        name: 归因逻辑（触点=归因指标，分行业隔离）
+        none_new: true
+        persona: wiki/personas/persona-attribution-architect.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/monetization-first-principle/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/methodology-orthogonality/SKILL.md
+        requires: [T-ATTRIBUTION.ARCH]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["归因逻辑", "触点", "归因模型", "分行业隔离", "第一指标"]
+        # 出口闸语义：第一性校验 —— 消耗 = 第一指标，不满足即 BLOCKED
+        artifact_format_checks:
+          - executor_tag
+          - first_principle_spend_is_primary
+          - industry_isolation_declared
+
+      DATASPEC:
+        name: 指标与数据契约（消耗/过程/效率/收入）
+        none_new: true
+        persona: wiki/personas/persona-data-analyst.md
+        persona_status: ready   # 复用存量，一字不改
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/monetization-first-principle/SKILL.md
+        requires: [T-ATTRIBUTION.LOGIC]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["指标", "数据契约", "埋点", "字段定义", "口径"]
+        # 出口闸语义：指标四类齐全（消耗/过程/效率/收入）
+        artifact_format_checks:
+          - executor_tag
+          - four_metric_classes
+          - no_fabricated_metrics
+
+      PRD:
+        name: PRD 撰写 + 互评收敛
+        none_new: true
+        persona: wiki/personas/persona-brief-packager.md   # 复用 T-ORCHESTRA 链路
+        persona_status: ready
+        reuses: [T-ORCHESTRA.PACKAGE, T-ORCHESTRA.CROSS_REVIEW, T-ORCHESTRA.ADJUDICATE]
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/dual-executor-consensus/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/AGENT_DIVISION_SPEC.md
+        requires: [T-ATTRIBUTION.DATASPEC, T-ORCHESTRA.CROSS_REVIEW]
+        exit_gate: manual_confirm   # 互评一致率 ≥90% + 人签字（L2），人签字缺失 → rc=3
+        output_class: internal_final
+        triggers: ["PRD", "需求文档", "产品文档", "写PRD"]
+        artifact_format_checks:
+          - executor_tag
+          - consensus_rate_ge_90
+          - human_signature_present
+
+  # -------------------------------------------------------------------
+  # T-DECISION｜分析决策轨（新建）
+  # 分轨判据：错了=重写一次 → 决策卡片（FRAME→CHAIR 两节点即可）；错了=全链路返工 → 完整版（FRAME→COUNCIL→HATS→CHAIR）。
+  # COUNCIL/HATS 的产出属智力活，必须外包给 codex/claude；框架层只做 FRAME 判据与 CHAIR 收口的调度与质检。
+  # -------------------------------------------------------------------
+  T-DECISION:
+    source: 新建
+    mode: observe
+    modes:
+      card: [T-DECISION.FRAME, T-DECISION.CHAIR]                                   # 创作类，10 分钟，≤一页纸
+      full: [T-DECISION.FRAME, T-DECISION.COUNCIL, T-DECISION.HATS, T-DECISION.CHAIR]  # 策略/决策/分析类
+    nodes:
+
+      FRAME:
+        name: 分轨判据
+        none_new: true
+        persona: wiki/personas/persona-dispatch-router.md   # 框架执行，复用
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/decision-framework/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/methodology-orthogonality/SKILL.md
+        requires: []
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["判据", "用卡片还是完整版", "这决定多大", "分轨判据"]
+        # 出口闸语义：判据结论必须落盘一行（card / full），口头判断不算
+        artifact_format_checks: [executor_tag, verdict_line_present]
+
+      COUNCIL:
+        name: 五智囊对抗
+        none_new: true
+        persona: wiki/personas/persona-devils-council.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/decision-framework/SKILL.md
+          - /home/ubuntu/.hermes/skills/thinking/multi-model-consensus/SKILL.md
+        requires: [T-DECISION.FRAME]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["五智囊", "对抗", "反驳者", "本质追问", "机会发现", "外行人", "无情执行者"]
+        # 出口闸语义：五角色逐条出现，缺一 BLOCKED
+        artifact_format_checks:
+          - executor_tag
+          - five_roles_each_present
+          - outsourced_to_executor   # 智力活必须外包，框架层不自产
+
+      HATS:
+        name: 六顶查漏
+        none_new: true
+        persona: wiki/personas/persona-six-hats.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/decision-framework/SKILL.md
+        requires: [T-DECISION.COUNCIL]
+        exit_gate: ticket_close
+        output_class: internal_intermediate
+        triggers: ["六顶帽子", "六帽", "白帽", "黄帽", "绿帽", "红帽", "查漏"]
+        # 出口闸语义：六帽逐条出现
+        artifact_format_checks:
+          - executor_tag
+          - six_hats_each_present
+          - outsourced_to_executor
+
+      CHAIR:
+        name: 主席综合 + 明早第一步
+        none_new: true
+        persona: wiki/personas/persona-chief-adjudicator.md   # 复用 T-ORCHESTRA.ADJUDICATE 人设
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/thinking/decision-framework/SKILL.md
+        # 卡片模式下上游只有 FRAME；完整版下 HATS 必须先 closed。
+        # open 校验按 modes 里实际选定的模式取子集，不按本行全量取交集。
+        requires: [T-DECISION.FRAME]
+        requires_when_full: [T-DECISION.HATS]
+        exit_gate: ticket_close
+        output_class: internal_final
+        triggers: ["主席结论", "综合", "拍个结论", "明早第一步", "行动"]
+        # 出口闸语义：必须含「行动」段——只给分析不给行动 = BLOCKED
+        artifact_format_checks: [executor_tag, action_section_present]
+
+  # -------------------------------------------------------------------
+  # T-OPS｜客户运营主链轨（映射 WORKFLOW_REGISTRY 19 语义节点）
+  # 节点 ID 直接沿用注册表语义 ID，不新造。产物/门禁语义仍以注册表为准（registry_ref 回指）。
+  # 本表 requires 是「节点 ID 列表」，由注册表的 artifact 依赖图翻译而来——注册表 requires 是 A_* 产物 ID，
+  #   票据层 open 需要节点粒度，两者不是同一层，故必须翻译，不可直接照抄。
+  # 出口闸一律委托 workflow_gate.py check，本轨不新建任何内容门。
+  # ⚠️ 见 meta.known_blockers.workflow_gate_no_approve：Phase 0-A 未做则本轨票据链必死锁。
+  # -------------------------------------------------------------------
+  T-OPS:
+    source: WORKFLOW_REGISTRY
+    source_ref: /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+    mode: observe
+    common_deps: &ops_common
+      - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+      - /home/ubuntu/workflow/wiki/spec/WORKFLOW_SPEC.yaml
+    nodes:
+
+      PROJECT_CHARTER:
+        name: 合作立项与资料建档
+        registry_ref: PROJECT_CHARTER
+        persona: wiki/personas/persona-info-collector.md
+        persona_status: ready
+        deps: *ops_common
+        requires: []
+        exit_gate: "workflow_gate.py:G_PROJECT_AUTHORIZED"
+        output_class: internal_intermediate
+        client_view_export: [D_START_EXECUTION_GUIDE, D_START_ASSET_LIST]
+        triggers: ["立项", "建档", "授权", "合作开始", "资料清单"]
+        artifact_format_checks: [executor_tag, assets_copied_to_project]
+
+      BUSINESS_DIAGNOSIS:
+        name: 门店经营诊断
+        registry_ref: BUSINESS_DIAGNOSIS
+        persona: wiki/personas/persona-business-diagnostician.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-OPS.PROJECT_CHARTER]
+        exit_gate: "workflow_gate.py:G_BUSINESS_BASELINE_READY"
+        output_class: internal_intermediate
+        client_view_export: [D_START_BUSINESS_DIAGNOSIS]
+        triggers: ["经营诊断", "门店诊断", "基线", "产能", "数据缺口"]
+        artifact_format_checks: [executor_tag, data_gaps_listed]
+
+      MARKET_INSIGHT:
+        name: 顾客、商圈、竞争与内容洞察
+        registry_ref: MARKET_INSIGHT
+        persona: wiki/personas/persona-user-analyst.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/human-drivers-library.md
+          - /home/ubuntu/workflow/wiki/concepts/china-consumer-sociology.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/data-sourcing-strategy.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-OPS.BUSINESS_DIAGNOSIS, T-OPS.PROJECT_CHARTER]
+        exit_gate: "workflow_gate.py:G_INSIGHT_VERIFIED"   # 市场洞察与素材真实性统一由此门触发底层检查
+        output_class: internal_intermediate
+        client_view_export: [D_START_AUDIENCE, D_START_COMPETITION]
+        triggers: ["市场洞察", "商圈", "竞品", "对标账号", "顾客洞察", "素材黑名单"]
+        artifact_format_checks: [executor_tag, data_source_cited, no_fabricated_metrics]
+
+      OFFER_PATH:
+        name: 主推项目与预约路径设计
+        registry_ref: OFFER_PATH
+        persona: wiki/personas/persona-offer-designer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+          - /home/ubuntu/.hermes/skills/thinking/monetization-first-principle/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-OPS.BUSINESS_DIAGNOSIS, T-OPS.MARKET_INSIGHT]
+        exit_gate: "workflow_gate.py:G_OFFER_VIABLE"
+        output_class: internal_intermediate
+        client_view_export: [D_START_OFFER_PATH]
+        triggers: ["主推项目", "预约路径", "单位经济", "产能护栏", "爆品设计"]
+        artifact_format_checks: [executor_tag, unit_economics_present]
+
+      GROWTH_STRATEGY:
+        name: 平台选择与整体打法
+        registry_ref: GROWTH_STRATEGY
+        persona: wiki/personas/persona-growth-strategist.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/industry-strategy-overview.md
+          - /home/ubuntu/workflow/wiki/concepts/account-staged-operations-library.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.BUSINESS_DIAGNOSIS, T-OPS.MARKET_INSIGHT, T-OPS.OFFER_PATH]
+        exit_gate: "workflow_gate.py:G_STRATEGY_BY_CODEX"   # 含 produced_by_codex 硬校验
+        output_class: internal_intermediate
+        client_view_export: [D_START_GROWTH_PLAYBOOK]
+        triggers: ["打法", "策略", "平台组合", "内容配比", "投流", "变现方式", "阶段节奏"]
+        artifact_format_checks: [executor_tag, produced_by_codex, five_sections_playbook]
+
+      OPERATING_INFRA:
+        name: 账号、门店位置、预约与数据基建
+        registry_ref: OPERATING_INFRA
+        persona: wiki/personas/persona-ops-infra-engineer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/platform-publishing-guide.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.GROWTH_STRATEGY, T-OPS.OFFER_PATH]
+        exit_gate: "workflow_gate.py:G_INFRA_READY_FOR_PUBLISH"
+        output_class: internal_intermediate
+        client_view_export: [D_START_INFRA_CHECKLIST]
+        triggers: ["基建", "账号搭建", "POI", "预约入口", "埋点", "值班表"]
+        artifact_format_checks: [executor_tag, tracking_spec_present]
+
+      CONTENT_CALENDAR:
+        name: 周月内容矩阵与排期
+        registry_ref: CONTENT_CALENDAR
+        persona: wiki/personas/persona-strategy-editor.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/account-staged-operations-library.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-strategy-overview.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.GROWTH_STRATEGY, T-OPS.OFFER_PATH, T-OPS.OPERATING_INFRA]
+        exit_gate: "workflow_gate.py:G_CONTENT_PLAN_READY"
+        output_class: internal_intermediate
+        client_view_export: [D_CYCLE_CALENDAR]
+        triggers: ["内容矩阵", "排期", "周计划", "月计划", "内容日历", "周期预算"]
+        artifact_format_checks: [executor_tag, calendar_covers_cycle]
+
+      TOPIC_EXPERIMENT:
+        name: 选题实验
+        registry_ref: TOPIC_EXPERIMENT
+        persona: wiki/personas/persona-strategy-editor.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/50-viral-hook-templates.md
+          - /home/ubuntu/workflow/wiki/concepts/golden-3-seconds.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-review-gate/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.CONTENT_CALENDAR, T-OPS.GROWTH_STRATEGY, T-OPS.MARKET_INSIGHT]
+        exit_gate: "workflow_gate.py:G_TOPIC_READY"
+        output_class: internal_intermediate
+        client_view_export: [D_CYCLE_TOPICS]
+        triggers: ["选题实验", "选题定稿", "外部校准", "候选选题"]
+        artifact_format_checks: [executor_tag, external_calibration_present]
+
+      COPY_PACKAGE:
+        name: 多版文案与平台版本
+        registry_ref: COPY_PACKAGE
+        persona: wiki/personas/persona-creative-director.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/copywriting-spec.md
+          - /home/ubuntu/workflow/wiki/concepts/six-oral-styles.md
+          - /home/ubuntu/workflow/wiki/concepts/xiaohongshu-title-and-copy-templates.md
+          - /home/ubuntu/workflow/wiki/concepts/compliance-checklist.md
+          - /home/ubuntu/workflow/wiki/concepts/compliance-platform-rules.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-review-gate/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-OPS.TOPIC_EXPERIMENT, T-OPS.OFFER_PATH, T-OPS.GROWTH_STRATEGY, T-OPS.CONTENT_CALENDAR, T-OPS.MARKET_INSIGHT]
+        exit_gate: "workflow_gate.py:G_COPY_READY + confirm_gate.py:status"  # 客户确认未迁移前不得绕过
+        output_class: internal_intermediate
+        client_view_export: [D_CYCLE_COPY_SET, D_CYCLE_PLATFORM_COPY]
+        triggers: ["多版文案", "平台版本", "三版", "盲评", "文案定稿"]
+        artifact_format_checks:
+          - executor_tag
+          - no_table
+          - no_shot_number
+          - no_speaker_label
+          - three_versions_present
+          - blind_review_top_score_ge_60
+
+      CREATIVE_BLUEPRINT:
+        name: 分镜、画面与视觉基线
+        registry_ref: CREATIVE_BLUEPRINT
+        persona: wiki/personas/persona-storyboard-artist.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/shotcraft-templates.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/video-production/SKILL.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/ai-image-gen-strategy/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.COPY_PACKAGE, T-OPS.PROJECT_CHARTER]
+        exit_gate: "workflow_gate.py:G_CREATIVE_READY"
+        output_class: internal_intermediate
+        client_view_export: [D_CYCLE_VISUAL_PLAN]
+        # 注册表 validation：总时长 30s±1，单镜 ≤15s，口播单镜 ≤10s
+        triggers: ["分镜表", "视觉基线", "画面规划", "场景素材映射", "镜头需求"]
+        artifact_format_checks:
+          - executor_tag
+          - eight_columns
+          - talking_head_shot_le_10s
+          - total_duration_within_tolerance
+          - no_fast_speech_prompt
+
+      MEDIA_PREP:
+        name: 素材与生成准备
+        registry_ref: MEDIA_PREP
+        persona: wiki/personas/persona-material-collector.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/ai-image-gen-strategy/SKILL.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/five-layer-prompt-structure.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/volcano-bypass-three-view-format.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/cost-reference.md
+        requires: [T-OPS.CREATIVE_BLUEPRINT, T-OPS.PROJECT_CHARTER]
+        exit_gate: "workflow_gate.py:G_RENDER_READY + confirm_gate.py:status"
+        output_class: internal_intermediate
+        triggers: ["素材准备", "生成准备", "提示词包", "渲染预算", "三视图"]
+        artifact_format_checks:
+          - executor_tag
+          - three_view_structure
+          - per_shot_ref_expanded
+          - ref_abs_path_bound
+          - budget_approved
+
+      MEDIA_PRODUCTION:
+        name: 成片图文制作与技术检验
+        registry_ref: MEDIA_PRODUCTION
+        persona: wiki/personas/persona-render-engineer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/seedance-api-format.md
+          - /home/ubuntu/workflow/wiki/concepts/ffmpeg-synthesis-guide.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/subtitle-and-audio-synthesis.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/huoshan/references/api-contract.md
+        requires: [T-OPS.MEDIA_PREP]
+        exit_gate: "workflow_gate.py:G_TECHNICAL_QC_PASS + confirm_gate.py:status"
+        output_class: internal_intermediate
+        client_view_export: [D_CYCLE_MEDIA]
+        triggers: ["成片", "出片", "图文制作", "技术检验", "封面", "字幕", "成本台账"]
+        artifact_format_checks: [executor_tag, local_file_exists, cost_recorded]
+
+      DELIVERY_PACKAGE:
+        name: 内容终检与发布承接包
+        registry_ref: DELIVERY_PACKAGE
+        persona: wiki/personas/persona-operation.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/content-verification-protocol.md
+          - /home/ubuntu/workflow/wiki/spec/templates/publish_strategy_template_v1.md
+          - /home/ubuntu/workflow/wiki/concepts/platform-publishing-guide.md
+        requires: [T-OPS.MEDIA_PRODUCTION, T-OPS.GROWTH_STRATEGY, T-OPS.CONTENT_CALENDAR, T-OPS.OFFER_PATH, T-OPS.OPERATING_INFRA]
+        exit_gate: "workflow_gate.py:G_DELIVERY_READY + feishu_send_gate.py"
+        output_class: external_delivery
+        client_view_export: [D_CYCLE_PUBLISH_PACK, D_CYCLE_PUBLISH_GUIDE, D_CYCLE_RESPONSE_GUIDE]
+        triggers: ["承接包", "终检", "交付包", "追踪码", "应答手册"]
+        artifact_format_checks: [executor_tag, desensitized, link_on_own_line, trace_code_set_present]
+
+      PUBLISH_OPERATE:
+        name: 发布上线与首轮运营
+        registry_ref: PUBLISH_OPERATE
+        persona: wiki/personas/persona-publish-specialist.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/platform-publishing-guide.md
+          - /home/ubuntu/workflow/wiki/strategies/douyin-kuaishou-publishing-strategy.md
+          - /home/ubuntu/workflow/wiki/strategies/xiaohongshu-publishing-strategy.md
+        requires: [T-OPS.DELIVERY_PACKAGE, T-OPS.OPERATING_INFRA]
+        exit_gate: "workflow_gate.py:G_PUBLISH_READY + permission_gate.py"
+        output_class: external_delivery
+        client_view_export: [D_OPS_PUBLISH_LOG]
+        triggers: ["发布上线", "首轮运营", "上线记录", "在线证据", "发布异常"]
+        artifact_format_checks: [executor_tag, desensitized, online_evidence_present]
+
+      LEAD_OPERATION:
+        name: 评论私信与公域线索运营
+        registry_ref: LEAD_OPERATION
+        persona: wiki/personas/persona-lead-operator.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+        requires: [T-OPS.PUBLISH_OPERATE, T-OPS.DELIVERY_PACKAGE, T-OPS.OPERATING_INFRA]
+        exit_gate: "workflow_gate.py:G_LEAD_CAPTURED"
+        output_class: internal_intermediate
+        client_view_export: [D_OPS_FUNNEL_LEDGER]
+        triggers: ["线索", "评论运营", "私信", "线索台账", "风险升级"]
+        artifact_format_checks: [executor_tag, lead_classified]
+
+      CONVERSION_OPERATION:
+        name: 预约、到店、成交与履约
+        registry_ref: CONVERSION_OPERATION
+        persona: wiki/personas/persona-conversion-operator.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+          - /home/ubuntu/workflow/wiki/concepts/industry-index.md
+        requires: [T-OPS.LEAD_OPERATION, T-OPS.OFFER_PATH, T-OPS.OPERATING_INFRA]
+        exit_gate: "workflow_gate.py:G_CONVERSION_RECORDED"
+        output_class: internal_intermediate
+        triggers: ["预约", "到店", "成交", "履约", "未到店跟进"]
+        artifact_format_checks: [executor_tag, real_data_source]
+
+      RETENTION_OPERATION:
+        name: 复购与转介绍运营
+        registry_ref: RETENTION_OPERATION
+        persona: wiki/personas/persona-retention-operator.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+        requires: [T-OPS.CONVERSION_OPERATION, T-OPS.OFFER_PATH]
+        exit_gate: "workflow_gate.py:G_RETENTION_LOOP_READY"
+        output_class: internal_intermediate
+        triggers: ["复购", "转介绍", "回访", "口碑授权", "留存"]
+        artifact_format_checks: [executor_tag, review_rights_recorded]
+
+      WEEKLY_REVIEW:
+        name: 每周数据归因与调整
+        registry_ref: WEEKLY_REVIEW
+        persona: wiki/personas/persona-data-analyst.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/data-review-template.md
+          - /home/ubuntu/workflow/wiki/concepts/xiaohongshu-ces-algorithm.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/workflow/wiki/concepts/optimization-tips.md
+        requires: [T-OPS.PUBLISH_OPERATE, T-OPS.LEAD_OPERATION, T-OPS.CONVERSION_OPERATION, T-OPS.RETENTION_OPERATION, T-OPS.MEDIA_PRODUCTION]
+        exit_gate: "workflow_gate.py:G_WEEKLY_REVIEW_READY"
+        output_class: internal_final
+        client_view_export: [D_OPS_WEEKLY_REVIEW, D_OPS_NEXT_WEEK_ACTIONS]
+        triggers: ["周复盘", "数据归因", "问题归属", "下周动作", "实验清单"]
+        artifact_format_checks: [executor_tag, real_data_source, no_fabricated_metrics, action_section_present]
+
+      MONTHLY_CLOSE:
+        name: 月度经营报告与下周期方案
+        registry_ref: MONTHLY_CLOSE
+        persona: wiki/personas/persona-review-optimizer.md
+        persona_status: ready
+        deps:
+          - /home/ubuntu/workflow/wiki/concepts/data-review-template.md
+          - /home/ubuntu/workflow/wiki/concepts/optimization-tips.md
+          - /home/ubuntu/.hermes/skills/newmedia-operations/content-data-review/SKILL.md
+          - /home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml
+        requires: [T-OPS.WEEKLY_REVIEW, T-OPS.CONVERSION_OPERATION, T-OPS.PUBLISH_OPERATE]
+        exit_gate: "workflow_gate.py:G_CYCLE_CLOSED"
+        output_class: internal_final
+        client_view_export: [D_OPS_MONTHLY_REPORT, D_OPS_NEXT_CYCLE_PLAN]
+        triggers: ["月报", "月度经营报告", "下周期方案", "预算修订", "续约范围"]
+        artifact_format_checks: [executor_tag, real_data_source, action_section_present]
+
+# =====================================================================
+# classify｜三态判定规则（workflow_ticket.py classify "<需求文本>" 读取本块）
+# 输出契约：{"state": "...", "track": "...", "candidate_nodes": ["TRACK.NODE", ...], "mode": "card|full|null",
+#            "matched": [{"rule": "...", "evidence": "..."}]}
+# guard 生成 block message 时调同一函数 —— 判定逻辑集中一处，SOUL 里只留三行摘要。
+# =====================================================================
+classify:
+
+  # 判定顺序：数值大者先判，命中即定态（对外交付优先级最高，见 arbitration.delivery_wins）
+  states:
+
+    external_delivery:
+      priority: 30
+      name: 对外交付态
+      # 「对外」不按跟谁说话判，按产物会不会离开内网判
+      any_of:
+        - ticket_output_class_is: external_delivery
+        - tool_class_is: OUTBOUND
+        - keyword_any: ["发客户", "给客户", "客户版", "对外", "发出去", "转星广", "发给第三方", "交付给"]
+        - target_channel_any: ["feishu", "webhook", "email", "sms", "外部URL"]
+      rules:
+        desensitize: true
+        forbid_patterns:
+          - "/home/ubuntu/"        # 服务器内部路径
+          - "/tmp/projects/"
+          - "MEDIA/"
+          - "T-(CONTENT|ORCHESTRA|ATTRIBUTION|DECISION|OPS)\\."   # 内部轨名/节点号
+          - "huoshan#节点\\d+"
+          - "\\b(codex|claude|DeepSeek|DS)\\b"                    # 执行器名
+          - "^(思考|推演|我的判断)"                                 # 思考过程
+        require:
+          - link_on_own_line       # 链接独立一行、纯文本、无标点包裹
+          - product_plus_usage_only
+        physical_check_point: "闸一 OUTBOUND 分支 → feishu_send_gate.py；ticket close 按 output_class 跑脱敏正则，命中即 BLOCK"
+
+    workflow:
+      priority: 20
+      name: 工作流态
+      any_of:
+        - trigger_hit_in_node_map: true        # 命中任一节点的 triggers
+        - mentions_project_or_store_name: true
+        - project_dir_exists: true
+        - explicitly_wants_artifact: true      # 老板明确要产物
+        - tool_class_any: [PRODUCE, DELEGATE, OUTBOUND, TERMINAL]
+      rules:
+        require_ticket: true                   # 必须 open 票据，persona 由脚本注入，LLM 不自证
+        follow_node_order: true
+        pass_exit_gate: true
+        label_prefix: "【轨:T-XXX｜节点:YYY】"
+        physical_check_point: "闸一按 tool_name + 参数反推，不依赖 LLM 自觉：任何 PRODUCE/DELEGATE/OUTBOUND/TERMINAL 动作即判工作流态"
+
+    internal_interaction:
+      priority: 10
+      name: 内部交互态
+      any_of:
+        - keyword_any: ["查一下", "什么状态", "进度", "路径是啥", "怎么看", "你觉得", "顺嘴问"]
+        - is_status_query: true
+        - is_path_confirmation: true
+        - wants_verbal_judgment_only: true     # 老板要口头判断不要产物
+      rules:
+        load_business_persona: false           # 纯框架态
+        style: 客观简洁，可展示推演
+        forbid_landed_artifact: true           # 不许产出落盘产物
+        physical_check_point: "闸一 READONLY 分支放行；一旦要写产物自动切工作流态并要票据"
+
+  # 工具动作分类（guard 反推态别用；与 §4.1 闸一分支一一对应）
+  tool_classes:
+    READONLY: {action: pass, examples: [read_file, list_dir, grep, status 查询]}
+    PRODUCE:
+      action: require_ticket
+      examples: [write_file, edit_file, 生成产物]
+      extra_check: [executor_tag, "guard/** 与 hashes/** 前缀写入一律 BLOCK（不看票据）"]
+    DELEGATE:
+      action: require_ticket
+      require_track: T-ORCHESTRA
+      examples: [派 codex, 派 claude, 派 DS]
+      reason: 不打包就甩给执行器 = BLOCKED
+    OUTBOUND:
+      action: require_ticket_and_gate
+      gate: feishu_send_gate.py
+      examples: [飞书发送, 外发链接]
+    TERMINAL:
+      action: block_if_bot_domain
+      examples: [直连 Helper API 1888, Seedance, Seedream, 婵镜, 火山 ARK]
+      rule: >-
+        Bot 域节点（T-CONTENT.INFO_COLLECT … T-CONTENT.STORYBOARD）禁直连，一切渲染 POST /execute(1889)。
+        唯一例外：段1 经 Helper API /seedream 生图合法。
+      exempt_nodes: [T-CONTENT.IMAGE_GEN, T-CONTENT.RENDER, T-OPS.MEDIA_PREP, T-OPS.MEDIA_PRODUCTION]
+
+  # 边界仲裁（三条，同时写进 L0 框架层 SOUL 摘要）
+  arbitration:
+    - id: uncertain_rounds_up
+      rule: 内部交互 vs 工作流拿不准 → 按工作流走
+      why: 多开一张票据的成本远低于跳流程返工
+    - id: one_input_can_cross_states
+      rule: 一句话既问判断又要产物 → 先内部交互给判断，产物部分单独开票据，不合并
+    - id: delivery_wins
+      rule: 一旦命中对外交付，脱敏规则覆盖所有 persona 与轨的输出偏好
+
+  # 分轨提示词（trigger 命中多轨时用它定轨；命中多轨且分不清 → 走 T-ORCHESTRA.INTAKE 先受理）
+  track_hints:
+    T-CONTENT: ["视频", "文案", "分镜", "出片", "生图", "选题", "剧本", "口播", "探店", "小红书图文"]
+    T-ORCHESTRA: ["派活", "打包", "互评", "终审", "多执行器", "codex", "claude", "降级", "谁来做"]
+    T-ATTRIBUTION: ["归因", "星广", "PRD", "指标", "数据契约", "触点", "系统架构"]
+    T-DECISION: ["决策", "方案", "要不要", "选哪个", "五智囊", "六顶帽子", "拍板"]
+    T-OPS: ["立项", "诊断", "打法", "基建", "排期", "线索", "成交", "复购", "周复盘", "月报", "客户运营"]
+    tie_breaker: T-ORCHESTRA.INTAKE
+
+  # 决策轨模式判据（错一次的代价定轻重，项目大小不作判据）
+  decision_mode_rule:
+    card: 错了=重写一次（文案/创作类）→ FRAME → CHAIR，10 分钟，≤一页纸
+    full: 错了=全链路返工/丢客户/方向错（策略/决策/分析类）→ FRAME → COUNCIL → HATS → CHAIR
+    forbid: 策略类用卡片糊弄；创作类上完整版（太重会被弃用）
+
+# =====================================================================
+# 合规红线（命中即 COMPLIANCE:，与节点无关，全轨生效）
+# 详见 /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+# =====================================================================
+compliance_redlines:
+  scope: all_tracks
+  skill: /home/ubuntu/.hermes/skills/newmedia-operations/content-redlines/SKILL.md
+  industry_rules:
+    餐饮: 禁极限词/绝对化用语
+    医美健康: 禁疗效承诺、禁产品横向对比
+    保健养生: 普通食品禁绑病症/禁医疗动词；保健食品仅可宣传备案功效
+    教育培训: 禁结果承诺；K12 学科全封禁；职业教育禁包就业
+    金融理财: 禁收益承诺/荐股/晒收益；无牌照禁讲解
+    风水命理: 禁玄学禁词/恐吓营销/付费命理；允许传统文化空间设计
+    情感: 风控适度放宽，严控负面引导
+  global: 送客词禁令——禁把读者导向第三方免费替代服务，客户明确要求才放行
+  data_discipline: 市场数据必须真实来源，禁编造；素材基于公开流传，明显编造过滤

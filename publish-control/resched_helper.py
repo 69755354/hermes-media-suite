@@ -4,10 +4,16 @@ import base64, json, os, re, sqlite3, sys, time, urllib.request
 from pathlib import Path
 
 BASE = "http://127.0.0.1:18977"
-ENV = "/home/ubuntu/workflow/projects/publish_control/.env"
-DB = "/home/ubuntu/workflow/projects/publish_control/control.db"
-BOT = "/home/ubuntu/workflow/projects/feishu_publish_bot/bot.py"
-BATCH_DIR = Path("/home/ubuntu/workflow/projects/feishu_publish_bot/mt_batches")
+ROOT = os.environ.get(
+    "PUBLISH_CONTROL_HOME",
+    "/home/ubuntu/workflow/projects/publish_control",
+)
+ENV = os.path.join(ROOT, ".env")
+DB = os.path.join(ROOT, "control.db")
+BOT_DIR = os.environ.get(
+    "PUBLISH_BOT_DIR", os.path.join(os.path.dirname(ROOT), "feishu_publish_bot"))
+BOT = os.path.join(BOT_DIR, "bot.py")
+BATCH_DIR = Path(os.path.join(BOT_DIR, "mt_batches"))
 CID = os.environ.get("PUBLISH_CUSTOMER_ID", "")
 
 def token():

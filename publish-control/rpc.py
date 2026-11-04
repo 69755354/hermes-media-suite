@@ -3,8 +3,12 @@
 import json, os, sqlite3, sys, time, urllib.request
 
 CUST = os.environ.get("PUBLISH_CUSTOMER_ID", "")
-DB = "/home/ubuntu/workflow/projects/publish_control/control.db"
-TOK = [l.split("=", 1)[1].strip() for l in open("/home/ubuntu/workflow/projects/publish_control/.env")
+ROOT = os.environ.get(
+    "PUBLISH_CONTROL_HOME",
+    "/home/ubuntu/workflow/projects/publish_control",
+)
+DB = os.path.join(ROOT, "control.db")
+TOK = [l.split("=", 1)[1].strip() for l in open(os.path.join(ROOT, ".env"))
        if l.startswith("CONTROL_ADMIN_TOKEN=")][0]
 
 

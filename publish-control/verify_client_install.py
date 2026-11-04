@@ -11,7 +11,10 @@ Usage: python3 verify_client_install.py --customer c_xxxx [--timeout 90]
 import argparse, base64, json, os, sqlite3, sys, time, urllib.request
 
 BASE = os.environ.get("CONTROL_URL", "http://127.0.0.1:18977").rstrip("/")
-ROOT = "/home/ubuntu/workflow/projects/publish_control"
+ROOT = os.environ.get(
+    "PUBLISH_CONTROL_HOME",
+    "/home/ubuntu/workflow/projects/publish_control",
+)
 DB = os.path.join(ROOT, "control.db")
 
 PS = r'''$ErrorActionPreference='SilentlyContinue'

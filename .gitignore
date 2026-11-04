@@ -16,3 +16,6 @@ backups/
 **/cookies*.json
 video-factory/runtime/
 video-team/work/
+
+# gate runtime state (tickets, alert logs)
+guard/

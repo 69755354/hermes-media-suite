@@ -28,13 +28,13 @@ def _pick_path(*cands):
     return cands[-1]
 
 _SD = os.path.dirname(os.path.abspath(__file__))
-REGISTRY = _pick_path("/home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml",
-                      "/home/ubuntu/wiki/spec/WORKFLOW_REGISTRY.yaml",
-                      os.path.join(_SD, "..", "wiki", "spec", "WORKFLOW_REGISTRY.yaml"))
-CREATIVE_ROUTE_TABLE = _pick_path("/home/ubuntu/workflow/wiki/spec/CREATIVE_ROUTE_TABLE.yaml",
-                                  "/home/ubuntu/wiki/spec/CREATIVE_ROUTE_TABLE.yaml",
-                                  os.path.join(_SD, "..", "wiki", "spec", "CREATIVE_ROUTE_TABLE.yaml"))
-SCRIPTS = "/home/ubuntu/workflow/scripts"
+REGISTRY = _pick_path(os.path.join(_SD, "..", "wiki", "spec", "WORKFLOW_REGISTRY.yaml"),
+                      "/home/ubuntu/workflow/wiki/spec/WORKFLOW_REGISTRY.yaml",
+                      "/home/ubuntu/wiki/spec/WORKFLOW_REGISTRY.yaml")
+CREATIVE_ROUTE_TABLE = _pick_path(os.path.join(_SD, "..", "wiki", "spec", "CREATIVE_ROUTE_TABLE.yaml"),
+                                  "/home/ubuntu/workflow/wiki/spec/CREATIVE_ROUTE_TABLE.yaml",
+                                  "/home/ubuntu/wiki/spec/CREATIVE_ROUTE_TABLE.yaml")
+SCRIPTS = _SD
 MIN_MD_BYTES = 200
 ALLOWED_STATUS = "ALLOWED"
 SKIPPED_STATUS = "SKIPPED"
@@ -530,7 +530,7 @@ def check_director_intent(proj, reg=None):
         report = os.path.join(report_dir, f"导演评审报告_{stem}.md")
         try:
             rc = subprocess.run(
-                [sys.executable, "/home/ubuntu/workflow/scripts/director_review_scorer.py",
+                [sys.executable, os.path.join(SCRIPTS, "director_review_scorer.py"),
                  creative_file, "--out", report],
                 capture_output=True, text=True, timeout=180,
             )
@@ -1017,9 +1017,14 @@ def check_voice(proj, reg=None):
     return True
 
 
+_HOME_DIR = os.path.expanduser("~")
+WORKFLOW_HOME = os.environ.get("WORKFLOW_HOME", os.path.join(_HOME_DIR, "workflow"))
+HERMES_HOME = os.environ.get("HERMES_HOME", os.path.join(_HOME_DIR, ".hermes"))
+_SIX_CHECKS_REL = "newmedia-operations/huolong-replica-template/scripts/huolong_six_checks.py"
 SIX_CHECKS_CANDIDATES = (
-    "/home/ubuntu/.hermes/skills/newmedia-operations/huolong-replica-template/scripts/huolong_six_checks.py",
-    "/home/ubuntu/workflow/projects/rules_fix_20260929/work/gate_fix/patched/home/ubuntu/.hermes/skills/newmedia-operations/huolong-replica-template/scripts/huolong_six_checks.py",
+    os.path.join(HERMES_HOME, "skills", _SIX_CHECKS_REL),
+    os.path.join(WORKFLOW_HOME, "projects/rules_fix_20260929/work/gate_fix/patched",
+                 HERMES_HOME.lstrip("/"), "skills", _SIX_CHECKS_REL),
 )
 MULTI_SEGMENT_RE = re.compile(r"段\s*[2-9]")
 
@@ -1087,7 +1092,7 @@ def check_huolong_six_subtitle(proj):
 def run_legacy(proj, pairs):
     for script, gate in pairs:
         result = subprocess.run(
-            ["python3", os.path.join(SCRIPTS, script), "check", proj, gate],
+            [sys.executable, os.path.join(SCRIPTS, script), "check", proj, gate],
             capture_output=True, text=True)
         if result.returncode != 0:
             print(f"BLOCKED:{gate}:{result.stdout.strip() or result.stderr.strip()}")

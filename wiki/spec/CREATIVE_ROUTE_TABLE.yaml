@@ -1,0 +1,88 @@
+meta:
+  version: '1.0'
+  update_date: '2026-08-20'
+  source_of_truth: true
+  consumers:
+    - scripts/route_resolver.py
+    - scripts/workflow_gate.py
+    - hermes_task_dispatch.py
+
+model_tiers:
+  CREATIVE:
+    allow: [ds_flash, codex, claude]
+    fallback: [ds_pro]
+    deny: []
+    verify: attestation_recorded
+  ANALYTIC:
+    allow: [ds_flash, codex, claude, ds_pro]
+    deny: []
+  MECHANICAL:
+    allow: [ds_flash, codex, claude]
+    deny: []
+
+gate_profiles:
+  SHOT_TALKING_HEAD:
+    dialogue_max_chars: null
+    target_total_duration_seconds: null
+    require_voice_field: true
+    intent_review:
+      mode: WARN
+      threshold: 45
+  SHOT_STORE_VISIT:
+    dialogue_max_chars: null
+    target_total_duration_seconds: null
+    require_voice_field: true
+    intent_review:
+      mode: WARN
+      threshold: 45
+  SHOT_NARRATIVE:
+    dialogue_max_chars: null
+    target_total_duration_seconds: null
+    require_voice_field: true
+    intent_review:
+      mode: WARN
+      threshold: 45
+
+routes:
+  CREATIVE_BLUEPRINT:
+    cognition: CREATIVE
+    role: director
+    common:
+      kb:
+        - frame-continuity
+        - shot-language-core
+      skill:
+        - director-thinking
+        - video-production
+    by_content_type:
+      口播:
+        kb: [chanjing-params-spec]
+        skill: []
+        gate_profile: SHOT_TALKING_HEAD
+      探店:
+        kb: [store-visit-routing]
+        skill: []
+        gate_profile: SHOT_STORE_VISIT
+      剧情:
+        kb: [seedance-2.0-prompt-formula]
+        skill: []
+        gate_profile: SHOT_NARRATIVE
+    scope_guard:
+      applies_to_artifacts:
+        - A_STORYBOARD
+        - A_PROMPT_PACKAGE
+      filename_patterns:
+        - "**/*prompt*.md"
+        - "**/*prompt*.txt"
+        - "**/*提示词*.md"
+        - "**/*提示词*.txt"
+        - "**/*执行脚本*.md"
+        - "**/*执行脚本*.txt"
+        - "**/*执行脚本*.py"
+      # 非创作产物目录：派活任务书是输入，不进入导演意图评审。
+      exclude_path_prefixes:
+        - "briefs/"
+        - "tasks/"
+        # 2026-08-24：闸自产的导演意图评审报告落在此目录，回扫会形成递归自噬（报告 mtime 恒晚于创作文件，
+        # 会把真实分镜挤出 top-3，导致 S01 v3 永久 BLOCK）。闸的输出不得成为闸的输入。
+        - "guard/director_review/"

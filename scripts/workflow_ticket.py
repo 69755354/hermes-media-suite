@@ -23,13 +23,22 @@ from datetime import datetime, timezone
 import yaml
 
 
-REPO_ROOT = "/home/ubuntu/workflow"
-NODE_MAP = os.path.join(REPO_ROOT, "wiki/spec/HERMES_NODE_MAP.yaml")
+_HOME_DIR = os.path.expanduser("~")
+REPO_ROOT = os.environ.get("WORKFLOW_HOME") or os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))
+HERMES_HOME = os.environ.get("HERMES_HOME", os.path.join(_HOME_DIR, ".hermes"))
+LEGACY_ROOTS = (
+    ("/home/ubuntu/workflow", lambda: REPO_ROOT),
+    ("/home/ubuntu/.hermes", lambda: HERMES_HOME),
+)
+NODE_MAP = os.environ.get(
+    "WORKFLOW_NODE_MAP", os.path.join(REPO_ROOT, "wiki/spec/HERMES_NODE_MAP.yaml"))
 WORKFLOW_GATE = os.environ.get(
     "WORKFLOW_TICKET_WORKFLOW_GATE",
     os.path.join(REPO_ROOT, "scripts/workflow_gate.py"),
 )
-TICKETS_DIR = os.path.join(REPO_ROOT, "guard/tickets")
+TICKETS_DIR = os.environ.get(
+    "WORKFLOW_TICKETS_DIR", os.path.join(REPO_ROOT, "guard/tickets"))
 LEDGER_NAME = "ticket_ledger.jsonl"
 TICKET_TTL_SECONDS = 86400   # 2026-10-04 客户授权：票期 2h → 24h
 MIN_ARTIFACT_BYTES = 200
@@ -168,7 +177,13 @@ def atomic_json_write(path, payload):
 
 
 def absolute_repo_path(path):
-    return path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
+    """解析节点表路径：相对路径挂当前仓库根，旧机绝对路径按当前根重映射。"""
+    value = str(path)
+    for legacy, current in LEGACY_ROOTS:
+        if value == legacy or value.startswith(legacy + "/"):
+            value = current() + value[len(legacy):]
+            break
+    return value if os.path.isabs(value) else os.path.join(REPO_ROOT, value)
 
 
 def validate_nonempty_file(path, label):
