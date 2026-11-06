@@ -26,8 +26,12 @@ def admin_token():
     raise SystemExit("no admin token")
 
 
-def enqueue(customer, op, args):
-    body = json.dumps({"customer_id": customer, "op": op, "args": args}).encode()
+def enqueue(customer, op, args, device=""):
+    payload = {"customer_id": customer, "op": op, "args": args}
+    if device:
+        # 多设备客户必须点名目标机器，否则控制面按旧路径随便挑一台。
+        payload["device_id"] = device
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(BASE + "/api/remote/exec", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", "Bearer " + admin_token())
@@ -57,6 +61,7 @@ def main():
     ap.add_argument("--file")
     ap.add_argument("--out")
     ap.add_argument("--timeout", type=int, default=60)
+    ap.add_argument("--device", default="", help="target device_id (multi-device customers)")
     ns, extra = ap.parse_known_args()
     # argparse keeps the '--' separator in parse_known_args; the agent would
     # try to exec a program literally named '--' (WinError 2).
@@ -85,7 +90,7 @@ def main():
     else:
         args = {}
 
-    op_id = enqueue(ns.customer, ns.op, args)
+    op_id = enqueue(ns.customer, ns.op, args, device=ns.device)
     status, result = wait(op_id, timeout=ns.timeout + 30)
     if ns.op == "read" and status == "done" and result.get("base64"):
         data = base64.b64decode(result["base64"])

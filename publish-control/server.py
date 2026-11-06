@@ -1760,6 +1760,33 @@ class H(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _send_update_file(self, name):
+        import re as _re
+        name = str(name or "")
+        if not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.(json|zip)", name):
+            return self._send(404, {"ok": False, "error": "not found"})
+        root = os.environ.get("CONTROL_UPDATE_DIR") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "updates")
+        full = os.path.join(root, name)
+        if not os.path.isfile(full):
+            return self._send(404, {"ok": False, "error": "not found"})
+        try:
+            with open(full, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            return self._send(500, {"ok": False, "error": "read failed"})
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         "application/json; charset=utf-8" if name.endswith(".json")
+                         else "application/zip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _body(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1930,6 +1957,12 @@ class H(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+
+        # ---- 更新分发（公开只读）-----------------------------------------
+        # 清单由 Ed25519 厂商签名保护、补丁包由清单里的 sha256 绑定，所以
+        # 公开可读不构成信任缺口；客户机 updater 只认签名，不认来源可信度。
+        if path.startswith("/update/"):
+            return self._send_update_file(path[len("/update/"):])
 
         if path == "/health":
             c = conn()

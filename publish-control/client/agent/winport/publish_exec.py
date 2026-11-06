@@ -5741,6 +5741,18 @@ class PlaywrightDriver:
                     value = user.get(key)
                     if value:
                         ids[key] = str(value)
+                # 顺手记下登录账号的真实昵称：机器人据此显示「1号（漫半拍）」，
+                # 不再回头问客户「这个号叫什么」。只存昵称，不碰任何凭据。
+                nickname = (user.get("nickname") or user.get("name")
+                            or user.get("unique_id"))
+                if nickname and self.layout is not None:
+                    self._observed_nickname = str(nickname)
+                    try:
+                        from .account_names import record
+                        record(self.layout, getattr(self.env, "env_id", ""),
+                               nickname)
+                    except Exception:
+                        pass
         except Exception:
             ids = {}
         if not ids:

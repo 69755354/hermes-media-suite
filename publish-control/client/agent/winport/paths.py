@@ -115,7 +115,20 @@ class Layout:
     # ---- data area -----------------------------------------------------
     @property
     def profiles(self) -> Path:
-        return self.data / "profiles"
+        # Chrome 由 agent 以安装根(<install>\profiles\env_N)启动，而客户数据目录
+        # (<install>\customers\<cid>) 下还留着一份旧版 profiles。发布 CLI 的端口
+        # 归属校验比对的是 --user-data-dir 的字面路径，取错目录会直接拒绝发布
+        # （"无法安全确认占用端口 9225 的进程属于2号 的 Chrome 配置目录"）。
+        # 安装根存在非空 profiles 时一律以它为准。
+        local = self.data / "profiles"
+        try:
+            if self.data.parent.name.lower() == "customers":
+                shared = self.data.parent.parent / "profiles"
+                if shared.is_dir() and any(shared.iterdir()):
+                    return shared
+        except OSError:
+            pass
+        return local
 
     @property
     def profile_douyin(self) -> Path:

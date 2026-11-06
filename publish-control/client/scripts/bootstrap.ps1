@@ -268,6 +268,35 @@ if (-not (Test-Path $VenvPy)) {
     if ($pipCode -ne 0) { throw "离线安装依赖失败（exit $pipCode）：wheels 目录不完整。" }
   }
 
+  # ---- 2b) 依赖自检 + 自愈（2026-11-05 实修）------------------------------
+  # 现场事故：.venv 存在但 Lib\site-packages 为空（venv 是 --without-pip 建的，
+  # ensurepip 被拦却留下了 venv），之后每次升级都命中 "venv already present" 跳过
+  # 创建，pip 又用不了 → playwright 永远装不上，发布第一步就报
+  # "No module named 'playwright'"。这里每次启动都自检，缺了就重建/解压补回。
+  $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $depProbe = & $VenvPy -c "import playwright, greenlet, pyee; print('deps-ok')" 2>&1
+    $depRc = $LASTEXITCODE
+  } catch { $depProbe = $_.Exception.Message; $depRc = 1 } finally { $ErrorActionPreference = $eap }
+  if ($depRc -ne 0) {
+    Log "依赖缺失，重建 venv 并重装：$depProbe"
+    try { Remove-Item -LiteralPath (Join-Path $DataDir '.venv') -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+    & $RuntimePy -u -m venv --without-pip (Join-Path $DataDir '.venv') 2>&1 | ForEach-Object { LogNative $_ }
+    & $VenvPy -u -m ensurepip --upgrade 2>&1 | ForEach-Object { LogNative $_ }
+    if (Test-Path $Req) {
+      & $VenvPy -u -m pip install --no-index --find-links (Join-Path $Program 'wheels') -r $Req 2>&1 | ForEach-Object { LogNative $_ }
+      $retryCode = $LASTEXITCODE
+    } else { $retryCode = 1 }
+    if ($retryCode -ne 0) {
+      Log "pip 重装失败（exit $retryCode），改用 wheel 直接解压"
+      & $VenvPy -c "import zipfile,glob,os,sys;sp=os.path.join(sys.prefix,'Lib','site-packages');[zipfile.ZipFile(w).extractall(sp) for w in glob.glob(os.path.join(sys.argv[1],'*.whl'))]" (Join-Path $Program 'wheels') 2>&1 | ForEach-Object { LogNative $_ }
+    }
+    $eap2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $depProbe = & $VenvPy -c "import playwright, greenlet, pyee; print('deps-ok')" 2>&1; $depRc = $LASTEXITCODE } finally { $ErrorActionPreference = $eap2 }
+    if ($depRc -ne 0) { throw "依赖安装后自检失败：$depProbe" }
+  }
+  Log "依赖自检通过：$depProbe"
+
   # ---- 3) Playwright browsers are shipped; nothing to download ------------
   Log "PLAYWRIGHT_BROWSERS_PATH=$env:PLAYWRIGHT_BROWSERS_PATH"
 

@@ -232,6 +232,57 @@ def _materials_stamp(st):
             st.st_ctime_ns, st.st_mode)
 
 
+def _account_rows(layout):
+    """这台机器上的抖音号：环境 + 真昵称 + 是否真的登录过。
+
+    environments.json 里声明的空环境（从没登录过、profile 目录是空的）
+    不算账号——机器人以前按声明个数报「登录了 N 个号」，才会反复问客户。
+    """
+    from .account_names import load as load_names
+    from .platforms import load_registry
+    try:
+        envs, _channels = load_registry(layout)
+    except Exception:
+        return []
+    names = load_names(layout)
+    rows = []
+    for env in envs:
+        if not getattr(env, "enabled", True):
+            continue
+        if "douyin" not in (getattr(env, "platforms", None) or []):
+            continue
+        # 登录态目录有两个口径：客户目录下的 profiles（remote_ops 拿到的
+        # layout）和 agent 根目录下的 profiles（浏览器实际使用的那个）。
+        # 只看前者会把已登录的号误判成没登录，所以两处都看，非空即算登过。
+        logged_in = False
+        _roots = [Path(layout.profiles)]
+        _parent = Path(layout.profiles).parent
+        if _parent.name.lower() == "customers" and _parent.parent.name:
+            _roots.append(_parent.parent / "profiles")
+        for _root in _roots:
+            try:
+                _dir = _root / env.profile_name
+                if _dir.is_dir() and any(_dir.iterdir()):
+                    logged_in = True
+                    break
+            except OSError:
+                continue
+        cached = names.get(env.env_id)
+        cached = cached if isinstance(cached, dict) else {}
+        nickname = str(cached.get("nickname") or "").strip()
+        rows.append({
+            "env_id": env.env_id,
+            "channel_id": env.env_id + ":douyin",
+            "account_id": env.env_id + ":douyin",
+            "platform": "douyin",
+            "label": env.label,
+            "nickname": nickname or env.nickname or env.label,
+            "nickname_verified": bool(nickname),
+            "logged_in": bool(logged_in),
+        })
+    return rows
+
+
 def materials(config, payload=None, command_id=None):
     """Read a complete, stable snapshot. Never ensure/create a data directory."""
     payload = payload if isinstance(payload, dict) else {}
@@ -305,7 +356,10 @@ def materials(config, payload=None, command_id=None):
             raise ValueError("snapshot expired during hashing")
         root_map = {"inbox": str(roots[0]),
                     "desktop": str(roots[1]) if len(roots) > 1 else ""}
+        # accounts 只出一个键：带真是否登录 + 真实昵称的那份（以前这里是
+        # 声明清单，未登录的空环境也会被算成账号）。
         return {"ok": True, "schema": schema, "customer_id": customer,
+                "accounts": _account_rows(layout),
                 "device_id": device or None,
                 "binding_epoch": epoch,
                 "snapshot_id": _materials_digest(
@@ -332,6 +386,14 @@ def _topics(value):
     return out
 
 
+class NeedAccount(ValueError):
+    """Raised when several douyin accounts exist and none was chosen."""
+
+    def __init__(self, accounts):
+        self.accounts = list(accounts or [])
+        super().__init__("multiple_douyin_accounts")
+
+
 def _target(envs, channels, payload):
     account_id = str(payload.get("account_id") or "").strip()
     channel_id = str(payload.get("channel_id") or "").strip()
@@ -344,7 +406,14 @@ def _target(envs, channels, payload):
     if channel is None and env_id:
         channel = next((c for c in channels if c.env_id == env_id), None)
     if channel is None:
-        channel = next((c for c in channels if c.platform == "douyin" and c.enabled), None)
+        candidates = [c for c in channels
+                      if c.platform == "douyin" and c.enabled]
+        if len(candidates) > 1:
+            raise NeedAccount([
+                {"env_id": c.env_id, "channel_id": c.channel_id,
+                 "account_id": c.account_id, "nickname": c.nickname}
+                for c in candidates])
+        channel = candidates[0] if candidates else None
     if channel is None:
         raise ValueError("no enabled douyin channel is configured")
     env = next((e for e in envs if e.env_id == channel.env_id), None)
@@ -405,7 +474,15 @@ def prepare(config, payload=None, command_id=None):
 
     settings = load_settings(layout.settings_file)
     envs, channels = load_registry(layout)
-    env, channel = _target(envs, channels, payload)
+    try:
+        env, channel = _target(envs, channels, payload)
+    except NeedAccount as need:
+        names = ["%d) %s" % (i + 1, a.get("nickname") or a.get("account_id"))
+                 for i, a in enumerate(need.accounts)]
+        return {"ok": False, "stage": "prepare", "error": "need_account",
+                "accounts": need.accounts,
+                "message": "这台电脑登录了 %d 个抖音号，发哪个？%s"
+                           % (len(need.accounts), "  ".join(names))}
     try:
         files = _pick_files(layout, payload)
     except (OSError, ValueError) as exc:

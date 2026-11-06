@@ -13,7 +13,6 @@ import uuid, queue
 import io, ntpath, tempfile, threading, json, re, sys, time, hashlib, urllib.parse
 
 import receipt_issue
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HERMES_CONFIG = os.environ.get("HERMES_CONFIG") or os.path.join(
     os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"), "config.yaml")
@@ -5691,6 +5690,11 @@ def _mt_material_snapshot(chat_id, preferred_device=None):
         return device, None, "素材清单暂不可用：客户端不支持该协议。"
     if data.get("customer_id") != cid or data.get("device_id") != did:
         return device, None, "素材清单的来源设备或客户不一致，已拒绝。"
+    try:
+        device['accounts'] = [a for a in (data.get('accounts') or [])
+                              if isinstance(a, dict)]
+    except Exception:
+        device['accounts'] = []
     return device, _mt_clean_material_rows(data, did), None
 
 
@@ -6076,6 +6080,7 @@ def _mt_snapshot(d, count_only=False):
     d['draft_started_at'] = time.time()
     d['device_id'] = device.get('device_id')
     d['device'] = device
+    d['accounts'] = list(device.get('accounts') or [])
     d['snapshot'] = {'snapshot_id': uuid.uuid4().hex,
                      'customer_id': d['customer_id'],
                      'device_id': device.get('device_id'),
@@ -6123,7 +6128,32 @@ def _mt_pick(d, text):
     return _dialog_reply(d, '\u5df2\u9009 %s\uff1b\u672c\u6279\u7528\u4ec0\u4e48\u8bdd\u9898\uff1f\u56de\u590d\u300c\u9ed8\u8ba4\u300d\u300c\u4e0d\u586b\u300d\u6216 #\u8bdd\u9898\uff0c\u6309\u6e05\u5355\u5e8f\u53f7\u8986\u76d6\u5982 2:#\u5355\u72ec\u8bdd\u9898\u3002' % ','.join(map(str, indexes)))
 
 
+def _pick_account(text, accounts):
+    t = str(text or '').strip()
+    m = re.fullmatch(r'\u7b2c?(\d{1,2})\s*(?:\u4e2a|\u53f7)?', t)
+    if m:
+        i = int(m.group(1))
+        if 1 <= i <= len(accounts):
+            return accounts[i - 1]
+    for a in accounts:
+        name = str(a.get('nickname') or '').strip()
+        if name and name != '\u6296\u97f3' and (t == name or (len(name) >= 2 and name in t)):
+            return a
+    return None
+
+
 def _mt_prepare_draft(d):
+    accounts = [a for a in (d.get('accounts') or []) if a.get('enabled', True)]
+    if len(accounts) > 1 and not d.get('account_env'):
+        d['pending_accounts'] = accounts
+        d['pre_account_status'] = d.get('status')
+        d['status'] = 'awaiting_account'
+        _dialog_save(d)
+        lines = ['这台电脑登录了 %d 个抖音号，发哪个？' % len(accounts)]
+        for i, a in enumerate(accounts, 1):
+            lines.append('%d) %s' % (i, a.get('nickname') or a.get('account_id')))
+        lines.append('回数字即可。')
+        return _dialog_reply(d, '\n'.join(lines))
     if not d.get('topics_answered') or not d.get('selected'):
         return _dialog_reply(d, '\u8bf7\u5148\u9009\u7d20\u6750\u5e76\u56de\u7b54\u672c\u6279\u8bdd\u9898\u3002')
     if not d.get('confirmed_title') or len(d['confirmed_title']) > d['max_length']:
@@ -6178,6 +6208,10 @@ def _mt_prepare_draft(d):
                              for r in d['selected']],
                'material_sha256s': [r.get('sha256') for r in d['selected']
                                     if r.get('sha256')]}
+    if d.get('account_env'):
+        payload['env_id'] = d['account_env']
+    if len(accounts) == 1:
+        payload.setdefault('env_id', accounts[0].get('env_id'))
     if device_id:
         payload['device_id'] = device_id
         payload['target_device_id'] = device_id
@@ -6281,6 +6315,25 @@ def handle_multitenant(chat_id, text):
         _dialog_save(d)
         if compact in MT_CANCEL_WORDS:
             return cancel_mt_batch(chat_id)
+        if d.get('status') == 'awaiting_account' and d.get('pending_accounts'):
+            accs = d['pending_accounts']
+            if compact in ('\u91cd\u9009\u8d26\u53f7', '\u6362\u8d26\u53f7'):
+                d.pop('account_env', None)
+                d['status'] = d.get('pre_account_status') or 'awaiting_topics'
+                d.pop('pending_accounts', None)
+                _dialog_save(d)
+                return _mt_prepare_draft(d)
+            pick = _pick_account(compact, accs)
+            if pick:
+                d['account_env'] = pick.get('env_id')
+                d['account_label'] = pick.get('nickname')
+                d.pop('pending_accounts', None)
+                d['status'] = d.get('pre_account_status') or 'awaiting_topics'
+                _dialog_save(d)
+                return _mt_prepare_draft(d)
+            names = ' / '.join('%d)%s' % (i + 1, a.get('nickname') or a.get('account_id'))
+                               for i, a in enumerate(accs))
+            return _dialog_reply(d, '\u8bf7\u56de\u6570\u5b57\u9009\u8d26\u53f7\uff1a' + names)
         if compact in ('\u53ef\u4ee5', '\u597d', '\u884c', '\u597d\u7684', '\u55ef'):
             return _dialog_reply(d, '\u8fd9\u53e5\u8bdd\u4e0d\u4f5c\u4e3a\u53d1\u5e03\u6388\u6743\uff1b\u8bf7\u5b8c\u6210\u8bdd\u9898\u548c\u6807\u9898\u786e\u8ba4\uff0c\u518d\u786e\u8ba4\u6700\u7ec8\u53d1\u5e03\u5361\u3002')
         if compact == '\u786e\u8ba4\u91cd\u53d1':

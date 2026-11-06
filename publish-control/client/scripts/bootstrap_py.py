@@ -136,7 +136,38 @@ _LEGACY_TASKS = ("HuolongAgent\\Agent", "HuolongAgent\\Tunnel",
                  "ManjuPublishAssistant",
                  "ManjuPublishAssistantSupervisor")
 _LEGACY_RUN_VALUES = ("HuolongAgentAgent", "ManjuPublishAssistant")
+# Directory names this product used across releases.  The name only selects a
+# candidate; deletion still requires a valid MANIFEST version and bootstrap.
+_PRODUCT_DIR_PREFIXES = ("manju-publish-assistant", "publish-assistant-",
+                         "publish-worker-", "huolong-publish-")
 RELEASE_TIMEOUT_SECONDS = 10.0
+
+
+def _looks_like_product_dir(path) -> bool:
+    try:
+        name = Path(path).name.strip().lower()
+    except (TypeError, ValueError):
+        return False
+    return any(name.startswith(prefix) for prefix in _PRODUCT_DIR_PREFIXES)
+
+
+def _version_tuple(text):
+    """Comparable numeric version, or None for an unparseable string."""
+    try:
+        parts = [int(p) for p in str(text).strip().split(".")[:4]]
+    except (TypeError, ValueError):
+        return None
+    return tuple(parts) if parts else None
+
+
+def _is_vendor_app_dir(path) -> bool:
+    """``%LOCALAPPDATA%\\HuolongAgent\\app-1.2.x`` (older release layout)."""
+    try:
+        item = Path(path)
+        return bool(re.match(r"app-\d", item.name.strip().lower())) \
+            and item.parent.name.strip().lower() == "huolongagent"
+    except (TypeError, ValueError):
+        return False
 RELEASE_POLL_SECONDS = 0.5
 
 
@@ -359,12 +390,18 @@ def _valid_product_dir(path: Path):
         if not bootstrap:
             return False, "bootstrap entry missing", None
         manifest = path / "MANIFEST.json"
-        if not manifest.is_file():
-            return False, "MANIFEST.json missing", None
-        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
-        version = data.get("version") if isinstance(data, dict) else None
+        version = None
+        if manifest.is_file():
+            data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+            version = data.get("version") if isinstance(data, dict) else None
         if version is None or str(version).strip() == "":
-            return False, "MANIFEST version missing", None
+            # Very old builds predate MANIFEST.json.  The bootstrap entry above
+            # is still a product signature; take the version from the folder
+            # name (publish-assistant-1.2.49) so the upgrade can remove it.
+            match = re.search(r"(\d+\.\d+\.\d+)", path.name)
+            if not match:
+                return False, "MANIFEST version missing", None
+            version = match.group(1)
         return True, "", str(version)
     except (OSError, ValueError, UnicodeError) as exc:
         return False, "cannot validate: %s" % exc, None
@@ -534,7 +571,7 @@ def _discover_old_version_candidates(program, data, *, run_values=None,
     except OSError:
         siblings = []
     for item in siblings:
-        if item.name.lower().startswith("manju-publish-assistant"):
+        if _looks_like_product_dir(item):
             add(item, "sibling")
 
     marker = data / "run" / "program-path.txt"
@@ -556,12 +593,42 @@ def _discover_old_version_candidates(program, data, *, run_values=None,
         local_appdata = (os.environ.get("LOCALAPPDATA")
                          or str(Path.home() / "AppData" / "Local"))
     vendor = Path(local_appdata) / "HuolongAgent"
-    try:
-        app_dirs = list(vendor.glob("app-*"))
-    except OSError:
-        app_dirs = []
-    for item in app_dirs:
-        add(item, "LOCALAPPDATA app-*")
+    scan = [("LOCALAPPDATA app-*", vendor, ("app-",)),
+            ("LOCALAPPDATA Programs", Path(local_appdata) / "Programs", ()),
+            ("LOCALAPPDATA Programs/HuolongAgent",
+             Path(local_appdata) / "Programs" / "HuolongAgent", ())]
+    # Customers extract the zip wherever the browser put it (Downloads) or
+    # double-click it on the Desktop.  Those copies are exactly what keeps
+    # blocking an upgrade, so they are discovery sources too.
+    for label, folder in (("Desktop", _known_folder(_FOLDERID_DESKTOP)),
+                          ("Downloads", _known_folder(_FOLDERID_DOWNLOADS))):
+        if folder is not None:
+            scan.append((label, Path(folder), ()))
+    for label, folder, extra_prefixes in scan:
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            try:
+                if not item.is_dir():
+                    continue
+            except OSError:
+                continue
+            low = item.name.strip().lower()
+            if any(low.startswith(prefix) for prefix in extra_prefixes) \
+                    or _looks_like_product_dir(item):
+                add(item, label)
+                if not _valid_product_dir(item)[0]:
+                    # Old downloads were often unpacked into a container
+                    # folder; the real version directory sits one level down.
+                    try:
+                        children = [c for c in item.iterdir() if c.is_dir()]
+                    except OSError:
+                        children = []
+                    for child in children:
+                        if _looks_like_product_dir(child):
+                            add(child, label + "-container")
     return found
 
 
@@ -593,13 +660,18 @@ def _safe_old_version_dir(candidate, program, data, *, protected_roots=()):
             root_path = Path(root).expanduser().resolve()
         except OSError:
             continue
-        # Protect the whole known-folder/user-root subtree, not just the root
-        # itself.  If the real Downloads/Desktop folder was moved to another
-        # drive, a package extracted directly into it must never become an
-        # old-version deletion candidate.  Refusing too much is intentional:
-        # a stale directory is cheaper than deleting customer files.
-        if _same_or_related(resolved, root_path):
-            return False, "inside, at, or above a protected root: %s" % root
+        # Never delete the protected folder itself or anything containing it.
+        if resolved == root_path or _path_within(root_path, resolved):
+            return False, "is or contains a protected root: %s" % root
+        # Inside Desktop/Downloads/the user profile only a directory that
+        # already proves it is this product may be removed: a customer who
+        # extracted the zip there must not have to uninstall by hand, while
+        # their own files stay untouchable.  Product validation (MANIFEST
+        # version + bootstrap entry) is still applied by the caller.
+        if _path_within(resolved, root_path) \
+                and not (_looks_like_product_dir(resolved)
+                         or _is_vendor_app_dir(resolved)):
+            return False, "not a product directory inside %s" % root
     return True, "ok"
 
 
@@ -667,7 +739,6 @@ def _stop_processes_in_dir(root, log) -> int:
             continue
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and _process_alive(pid):
-            # wait-ok: poll
             time.sleep(0.25)
         if _process_alive(pid):
             log("    WARNING: pid %s did not exit" % pid)
@@ -831,6 +902,122 @@ def _write_verified_bytes(path: Path, payload: bytes, label: str) -> None:
                            % (label, path, len(payload), len(actual)))
 
 
+def _purge_leftover_dirs(roots, keep, current_version, log, protected=()) -> int:
+    """Stop processes and delete verified old product directories.
+
+    Split out of the installer step so the deletion rules can be exercised
+    without Windows: the inputs are paths, a version string and a logger.
+    """
+    removed_count = 0
+    seen = set()
+
+    def purge_one(entry) -> bool:
+        nonlocal removed_count
+        low = entry.name.lower()
+        try:
+            if not entry.is_dir():
+                return False
+        except OSError:
+            return False
+        norm = os.path.normcase(os.path.abspath(str(entry)))
+        if norm in keep or norm in seen:
+            return False
+        seen.add(norm)
+        # A junction/symlink named like a product directory must never be
+        # followed: rmtree would delete the link target instead.
+        if _is_reparse_point(entry):
+            log("purge: skip %s (symlink/reparse point)" % entry)
+            return False
+        is_junction = getattr(entry, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            log("purge: skip %s (junction)" % entry)
+            return False
+        # Never remove the running installer, its data, or an ancestor of
+        # either (a package nested one level deeper than usual).
+        if any(_same_or_related(entry, item) for item in protected):
+            log("purge: skip %s (current install or data)" % entry)
+            return False
+        valid, reason, version = _valid_product_dir(entry)
+        if not valid:
+            log("purge: skip %s (%s)" % (entry, reason))
+            return False
+        if version == current_version:
+            log("purge: skip %s (same version as this install)" % entry)
+            return False
+        have, want = _version_tuple(version), _version_tuple(current_version)
+        if have and want and have > want:
+            log("purge: skip %s (newer than this install)" % entry)
+            return False
+        stopped = 0
+        try:
+            stopped = _stop_processes_in_dir(entry, log)
+        except Exception as exc:  # cleanup must never break the install
+            log("purge: process stop in %s failed: %s" % (entry, exc))
+        removed, last_error = _remove_tree_with_retry(entry, log)
+        if not removed:
+            # A supervisor may have relaunched the agent between the kill
+            # and the delete; kill again and retry before giving up.
+            try:
+                _stop_processes_in_dir(entry, log)
+            except Exception:
+                pass
+            removed, last_error = _remove_tree_with_retry(entry, log)
+        if removed:
+            removed_count += 1
+            log("purge: removed old install dir %s (version=%s, "
+                "processes stopped=%d)" % (entry, version, stopped))
+            return True
+        log("purge: could not remove %s yet (%s); the later "
+            "cleanup pass will retry" % (entry, last_error))
+        return False
+
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            entries = sorted(root.iterdir())
+        except OSError as exc:
+            log("purge: cannot list %s: %s" % (root, exc))
+            continue
+        vendor_root = "huolongagent" in str(root).lower()
+        for entry in entries:
+            low = entry.name.lower()
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            # Real leftovers seen on a customer machine:
+            #   app-1.2.118 / app-1.2.119 (old program dirs)
+            #   publish-worker-1.2.x, publish-assistant-1.2.x
+            if not ((vendor_root and low.startswith("app-1."))
+                    or low.startswith("publish-worker-")
+                    or low.startswith("publish-assistant-")
+                    or low.startswith("manju-publish-assistant-")
+                    or low.startswith("huolong-publish-")
+                    or low.startswith("publish-worker_old")):
+                continue
+            if purge_one(entry):
+                continue
+            # Old downloads were often unpacked into a container folder
+            # ("manju-publish-assistant-1/<version>/"), so the version
+            # directory is one level deeper and still blocks nothing but
+            # wastes gigabytes.  Descend one level and clean those too.
+            try:
+                nested = [c for c in entry.iterdir()
+                          if c.is_dir() and _looks_like_product_dir(c)]
+            except OSError:
+                nested = []
+            for child in nested:
+                purge_one(child)
+            try:
+                if entry.is_dir() and not any(entry.iterdir()):
+                    entry.rmdir()
+                    log("purge: removed empty container %s" % entry)
+            except OSError:
+                pass
+    return removed_count
+
 class Installer:
     def __init__(self, program: Path) -> None:
         self.program = program
@@ -928,6 +1115,215 @@ class Installer:
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
+    def _win_kill_data_processes(self, dry_run: bool = False) -> int:
+        """Terminate every python/pythonw running from the product data dir.
+
+        1.2.178: this must not use psutil.  A failed upgrade leaves the venv's
+        psutil broken, and that is exactly the state this repair runs in --
+        the old code asked the broken component for the process inventory and
+        died with "process inventory failed" instead of repairing anything.
+        Toolhelp32 + QueryFullProcessImageName come from kernel32, so this
+        works before any dependency is installed, and it is Unicode-safe for
+        Chinese user names.
+        """
+        if os.name != "nt":
+            return 0
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        TH32CS_SNAPPROCESS = 0x00000002
+        PROCESS_TERMINATE = 0x0001
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD)]
+        # Handles are pointer-sized: without explicit argtypes ctypes would
+        # truncate them to 32 bits and every TerminateProcess call would fail.
+        k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.TerminateProcess.restype = wintypes.BOOL
+        k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+
+        def image_path(pid):
+            handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return ""
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(32768)
+                if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return buf.value
+                return ""
+            finally:
+                k32.CloseHandle(handle)
+
+        def snapshot():
+            snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if snap == INVALID_HANDLE_VALUE:
+                raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+            rows = []
+            try:
+                entry = PROCESSENTRY32W()
+                entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+                ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+                while ok:
+                    rows.append((int(entry.th32ProcessID), entry.szExeFile))
+                    ok = k32.Process32NextW(snap, ctypes.byref(entry))
+            finally:
+                k32.CloseHandle(snap)
+            return rows
+
+        mine = os.getpid()
+        data_dir = os.path.normcase(os.path.abspath(str(self.data)))
+        venv_dir = os.path.normcase(os.path.abspath(str(self.data / ".venv")))
+        # The supervisor holds the agent open; kill it first so the agent is
+        # not relaunched while we are terminating it.  owner.txt is the only
+        # place its pid is recorded when the task was not used to start it.
+        candidates = set()
+        try:
+            owner = json.loads(read_owner_text(
+                self.data / "run" / "supervisor.lock" / "owner.txt", self.log))
+            owner_pid = int(owner.get("pid") or 0)
+            if owner_pid > 0:
+                candidates.add(owner_pid)
+        except Exception:
+            pass
+        killed = 0
+        rows = snapshot()
+        names = {pid: name.lower() for pid, name in rows}
+        for pid in candidates:
+            if pid == mine or names.get(pid) not in ("wscript.exe", "cscript.exe"):
+                continue
+            if dry_run:
+                self.log("would stop old supervisor pid=%s" % pid)
+                killed += 1
+                continue
+            handle = k32.OpenProcess(PROCESS_TERMINATE, False, pid)
+            if handle:
+                k32.TerminateProcess(handle, 1)
+                k32.CloseHandle(handle)
+                killed += 1
+                self.log("stopped old supervisor pid=%s" % pid)
+        for pid, name in rows:
+            if pid == mine or pid in candidates:
+                continue
+            if name.lower() not in ("python.exe", "pythonw.exe"):
+                continue
+            path = os.path.normcase(image_path(pid))
+            if not path:
+                continue
+            if path.startswith(venv_dir) or path.startswith(data_dir + os.sep):
+                if dry_run:
+                    self.log("would stop product process pid=%s image=%s" % (pid, path))
+                    killed += 1
+                    continue
+                handle = k32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                if handle:
+                    k32.TerminateProcess(handle, 1)
+                    k32.CloseHandle(handle)
+                    killed += 1
+                    self.log("stopped product process pid=%s image=%s" % (pid, path))
+        # Report what survived instead of silently assuming success.
+        remaining = []
+        for pid, name in snapshot():
+            if pid == mine or name.lower() not in ("python.exe", "pythonw.exe"):
+                continue
+            path = os.path.normcase(image_path(pid))
+            if path.startswith(venv_dir) or path.startswith(data_dir + os.sep):
+                remaining.append("%s:%s" % (pid, path))
+        if remaining:
+            self.log("WARNING: product processes still running: %s"
+                     % ", ".join(remaining))
+        return killed
+
+    def step_quiesce(self) -> None:
+        """Stop old supervisors/agents BEFORE anything writes into the venv.
+
+        1.2.178: this used to run only in step_stop_running(), i.e. after
+        step_wheels().  pip then overwrote
+        .venv\Lib\site-packages\psutil\_psutil_windows.pyd while an old
+        pythonw.exe still had it mapped, and the upgrade died with
+        "[WinError 5] Access is denied" before it ever reached the stop step.
+        Every customer upgrading over a running install hit this.
+        """
+        if os.name != "nt":
+            return
+        for name in ("ManjuPublishAssistantSupervisor",):
+            for argv in (["schtasks", "/End", "/TN", name],
+                         ["schtasks", "/Change", "/TN", name, "/DISABLE"]):
+                try:
+                    subprocess.run(argv, capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    self.log("quiesce: %s failed: %s" % (argv[1], exc))
+        try:
+            self._win_kill_data_processes()
+        except Exception as exc:  # repair is best effort; pip retry follows
+            self.log("WARNING: process cleanup failed: %s: %s"
+                     % (type(exc).__name__, exc))
+
+    def step_purge_old_leftovers(self) -> None:
+        """Stop and delete what an older install left behind.
+
+        Reported by the customer: the old package kept files, locks and a
+        running supervisor around, so the new install could not take over and
+        the customer had to uninstall by hand.  This runs right after quiesce,
+        never touches the directory this install is using, and retries later
+        in step_cleanup_old_versions if a process still pins the files.
+        """
+        if os.name != "nt":
+            return
+        keep = {os.path.normcase(os.path.abspath(str(self.data))),
+                os.path.normcase(os.path.abspath(str(self.program)))}
+        roots = []
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            roots += [Path(local) / "HuolongAgent",
+                      Path(local) / "Programs",
+                      Path(local) / "Programs" / "HuolongAgent"]
+        for folder in (_known_folder(_FOLDERID_DESKTOP),
+                       _known_folder(_FOLDERID_DOWNLOADS)):
+            if folder is not None:
+                roots.append(Path(folder))
+        removed = _purge_leftover_dirs(roots, keep, self.version, self.log,
+                                       protected=(self.program, self.data))
+        if removed:
+            self.log("purge: removed %d old install dir(s)" % removed)
+        # Locks left by a crashed run make the new supervisor refuse to start.
+        run = self.data / "run"
+        for pattern in ("supervisor.lock", "supervisor.lock.guard"):
+            target = run / pattern
+            if not target.exists():
+                continue
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                self.log("purge: removed stale lock %s" % target)
+            except Exception as exc:
+                self.log("purge: lock %s still present: %s" % (target, exc))
+
     def _stop_legacy_supervisors(self):
         """Stop old supervisors, including same-path owners from an overwrite.
 
@@ -969,7 +1365,6 @@ class Installer:
                 self.log("  taskkill rc=%s" % res.returncode)
                 deadline = time.monotonic() + 10.0
                 while time.monotonic() < deadline and _process_alive(pid):
-                    # wait-ok: poll
                     time.sleep(0.25)
                 if _process_alive(pid):
                     raise RuntimeError(
@@ -1138,14 +1533,29 @@ class Installer:
         if code != 0 or not self.venv_py.exists():
             raise RuntimeError(f"venv/ensurepip failed (exit {code})")
 
+    def _pip_install(self, req: Path) -> int:
+        return self.run([self.venv_py, "-u", "-m", "pip", "install", "--no-index",
+                         "--find-links", self.program / "wheels", "-r", req])
+
     def step_wheels(self) -> None:
         req = self.program / "requirements.txt"
         if not req.exists():
             raise RuntimeError("requirements.txt missing under %s - package incomplete"
                                % self.program)
         self.log("[2/6] installing offline dependencies")
-        code = self.run([self.venv_py, "-u", "-m", "pip", "install", "--no-index",
-                         "--find-links", self.program / "wheels", "-r", req])
+        code = self._pip_install(req)
+        if code != 0:
+            # 1.2.178: a locked .pyd is the common upgrade failure.  Retry once
+            # after killing whatever still holds the venv, instead of aborting
+            # and leaving the customer with a panel that cannot start.
+            self.log("dependency install failed (exit %s) - stopping leftover "
+                     "agent processes and retrying once" % code)
+            try:
+                self._win_kill_data_processes()
+            except Exception as exc:
+                self.log("WARNING: process cleanup failed: %s: %s"
+                         % (type(exc).__name__, exc))
+            code = self._pip_install(req)
         if code != 0:
             raise RuntimeError(f"offline dependency install failed (exit {code})")
 
@@ -1227,7 +1637,6 @@ class Installer:
             if self.find_chrome():
                 self.log("chrome installed")
                 return
-            # wait-ok: poll
             time.sleep(2)
         self.log("chrome still not detected after install")
 
@@ -1479,11 +1888,21 @@ class Installer:
             if not safe:
                 self.log("  skip %s: %s" % (path, why))
                 continue
+            if not (_looks_like_product_dir(path) or _is_vendor_app_dir(path)):
+                self.log("  skip %s: not a product directory name" % path)
+                continue
             valid, reason, version = _valid_product_dir(path)
             if not valid:
                 self.log("  skip %s: product validation failed (%s)" % (path, reason))
                 continue
             self.log("  valid old product version=%s" % version)
+            if version == self.version:
+                self.log("  skip %s: same version as this install" % path)
+                continue
+            have, want = _version_tuple(version), _version_tuple(self.version)
+            if have and want and have > want:
+                self.log("  skip %s: newer than this install" % path)
+                continue
             size = _tree_size(path)
             try:
                 stopped = _stop_processes_in_dir(path, self.log)
@@ -1525,11 +1944,13 @@ class Installer:
             # Some customer machines deny schtasks to a non-elevated user.  That
             # is only fatal when it leaves an OLD task behind: such a task would
             # relaunch the previous program at logon.  With no task at all the
-            # HKCU Run entry above is the complete logon path, so continue and
-            # let the handover check prove the running agent.
+            # HKCU Run entry above is the complete logon path, and the agent must
+            # still come online NOW or the handover check fails the install.
             if self._supervisor_task_exists():
                 raise RuntimeError("could not replace/start ONLOGON supervisor task; check task permissions")
-            self.log("WARNING: logon task unavailable (no admin); using HKCU Run autostart only")
+            self.log("WARNING: logon task unavailable (no admin); starting supervisor directly")
+            if not self._launch_supervisor_direct(launcher):
+                raise RuntimeError("could not start supervisor directly")
         deadline = time.monotonic() + 75
         reason = "not checked"
         while time.monotonic() < deadline:
@@ -1537,7 +1958,6 @@ class Installer:
             if ready:
                 self.log("agent and supervisor verified: %s" % reason)
                 return
-            # wait-ok: poll
             time.sleep(0.5)
         raise RuntimeError("agent handoff failed: %s\n%s" %
                            (reason, supervisor_diagnostics(self.data)))
@@ -1550,6 +1970,28 @@ class Installer:
         except (OSError, subprocess.SubprocessError):
             return True  # cannot prove it is absent -> treat as present, stay strict
         return out.returncode == 0
+
+    def _launch_supervisor_direct(self, launcher: Path) -> bool:
+        """Start the supervisor without Task Scheduler.
+
+        Non-administrator accounts get "access denied" from schtasks.  HKCU Run
+        covers the next logon, but the current install has to come online now,
+        otherwise the handover check times out and the installer exits 5 --
+        exactly what happened on the first non-admin customer machine.
+        """
+        if os.name != "nt":
+            return False
+        try:
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(["wscript.exe", "//nologo", str(launcher)],
+                             close_fds=True,
+                             creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW)
+            self.log("supervisor started directly (schtasks unavailable)")
+            return True
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log("direct supervisor start failed: %s" % exc)
+            return False
 
     def _start_supervisor_as_user(self, launcher: Path) -> bool:
         """Create/run a logon task with LUA so an elevated install self-recovers."""
@@ -1586,7 +2028,7 @@ class Installer:
                 detail = (made.stderr or made.stdout or "").strip()
                 if detail:
                     self.log("  schtasks create: %s" % detail[:300])
-                return False
+                return self._launch_supervisor_direct(launcher)
             started = subprocess.run(
                 ["schtasks", "/Run", "/TN", task_name],
                 capture_output=True, timeout=30, **text_mode_options())
@@ -1595,10 +2037,11 @@ class Installer:
                 detail = (started.stderr or started.stdout or "").strip()
                 if detail:
                     self.log("  schtasks run: %s" % detail[:300])
-            return started.returncode == 0
+                return self._launch_supervisor_direct(launcher)
+            return True
         except (OSError, subprocess.SubprocessError) as exc:
             self.log("schtasks supervisor start failed: %s" % exc)
-            return False
+            return self._launch_supervisor_direct(launcher)
 
     def step_selfcheck_tool(self) -> None:
         """Drop a double-click self-check for the customer.
@@ -1707,6 +2150,8 @@ class Installer:
     def install(self) -> int:
         self.step_data_area()
         self.step_runtime_dlls()
+        self.step_quiesce()
+        self.step_purge_old_leftovers()
         self.step_venv()
         self.step_wheels()
         self.step_ffmpeg()

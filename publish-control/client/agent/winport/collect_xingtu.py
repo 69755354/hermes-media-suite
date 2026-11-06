@@ -385,10 +385,10 @@ def build_result(user_payload, performance_payload, detail_payloads=(), *,
     }
 
 
-def write_outputs(layout, data, *, day=None) -> dict:
+def write_outputs(layout, data, *, day=None, suffix="") -> dict:
     day = day or time.strftime("%Y%m%d")
     layout.out_xingtu.mkdir(parents=True, exist_ok=True)
-    json_path = layout.out_xingtu / f"星图数据_{day}.json"
+    json_path = layout.out_xingtu / f"星图数据_{day}{suffix}.json"
     write_json(json_path, data)
     return {"json": str(json_path)}
 
@@ -428,7 +428,7 @@ def _get_json(page, url, *, timeout_ms=30000):
         raise ConfigError("星图后台返回的数据无法识别，请稍后重试。") from exc
 
 
-def collect_via_cdp(layout, cdp_url=None, port=None, *, day=None) -> dict:
+def collect_via_cdp(layout, cdp_url=None, port=None, *, day=None, suffix="") -> dict:
     """Attach to the open browser and collect task + work-level data."""
     cdp_url = cdp_url or f"http://127.0.0.1:{port or DEFAULT_CDP_PORT}"
     try:
@@ -569,7 +569,7 @@ def collect_via_cdp(layout, cdp_url=None, port=None, *, day=None) -> dict:
         finally:
             if created_page:
                 page.close()
-    return {"data": data, "outputs": write_outputs(layout, data, day=day)}
+    return {"data": data, "outputs": write_outputs(layout, data, day=day, suffix=suffix)}
 
 
 def main(argv=None) -> int:

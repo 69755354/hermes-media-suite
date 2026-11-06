@@ -196,13 +196,13 @@ def cmd_collect_all(args):
     do_report = not args.collect_only
     collected = {}
     if do_collect:
+        def _field(env, key, default=None):
+            if isinstance(env, dict):
+                return env.get(key, default)
+            return getattr(env, key, default)
         try:
             if not args.skip_douyin:
                 from .collect_douyin import collect_via_cdp
-                def _field(env, key, default=None):
-                    if isinstance(env, dict):
-                        return env.get(key, default)
-                    return getattr(env, key, default)
                 envs = [e for e in _envs(layout)
                         if "douyin" in (_field(e, "platforms") or [])
                         and _field(e, "enabled", True)]
@@ -224,13 +224,34 @@ def cmd_collect_all(args):
                 collected["douyin"] = douyin_runs if len(douyin_runs) > 1 else douyin_runs[0]
             if not args.skip_xingtu:
                 from .collect_xingtu import collect_via_cdp as collect_xingtu
-                result = collect_xingtu(layout, day=args.day)
-                collected["xingtu"] = {
-                    "tasks": result["data"].get("task_count", 0),
-                    "items": result["data"].get("item_count", 0),
-                    "granularity": result["data"].get("granularity"),
-                    "output": result["outputs"]["json"],
-                }
+                # 星图是跟抖音号登录态绑定的：每个 env 各采一次、各写一份文件。
+                # 只采第一个号会导致第二个号的星图数据永远是 0。
+                x_envs = [e for e in _envs(layout)
+                          if _field(e, "enabled", True) and _field(e, "debug_port")]
+                x_runs, x_err = [], None
+                for xe in (x_envs or [None]):
+                    eid = _field(xe, "env_id") if xe is not None else None
+                    x_port = _field(xe, "debug_port") if xe is not None else None
+                    suffix = ("_" + str(eid)) if eid else ""
+                    try:
+                        res = collect_xingtu(layout, port=x_port, day=args.day,
+                                             suffix=suffix)
+                        x_runs.append({
+                            "env_id": eid,
+                            "port": x_port,
+                            "account": res["data"].get("name") or "",
+                            "tasks": res["data"].get("task_count", 0),
+                            "items": res["data"].get("item_count", 0),
+                            "granularity": res["data"].get("granularity"),
+                            "output": res["outputs"]["json"],
+                        })
+                    except Exception as exc:
+                        x_err = exc
+                if not x_runs:
+                    raise x_err or RuntimeError("xingtu collect failed")
+                first = dict(x_runs[0])
+                first["all"] = x_runs
+                collected["xingtu"] = first
         except Exception as exc:
             from .logutil import get_logger
             get_logger("winport.collect", layout.logs).error(
