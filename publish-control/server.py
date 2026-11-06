@@ -51,6 +51,8 @@ INBOUND_TOKEN_ENV = "CONTROL_INBOUND_TOKEN"
 
 #: Command kinds allowed on both the server and the customer machine.
 ALLOWED_KINDS = ("publish", "collect", "report", "status")
+#: /update/<file> streams in chunks of this size (bytes).
+UPDATE_CHUNK_BYTES = 1 << 20
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _RESERVED_NAMES = frozenset(
@@ -1770,22 +1772,29 @@ class H(BaseHTTPRequestHandler):
         full = os.path.join(root, name)
         if not os.path.isfile(full):
             return self._send(404, {"ok": False, "error": "not found"})
+        # Stream in chunks: the full offline package is ~300 MB and a handful of
+        # concurrent update checks must not each hold a copy in memory.
         try:
-            with open(full, "rb") as fh:
-                body = fh.read()
+            fh = open(full, "rb")
+            size = os.fstat(fh.fileno()).st_size
         except OSError:
             return self._send(500, {"ok": False, "error": "read failed"})
-        self.send_response(200)
-        self.send_header("Content-Type",
-                         "application/json; charset=utf-8" if name.endswith(".json")
-                         else "application/zip")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        with fh:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "application/json; charset=utf-8" if name.endswith(".json")
+                             else "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                while True:
+                    chunk = fh.read(UPDATE_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _body(self):
         try:

@@ -2,7 +2,9 @@
 """两个号作品 + 星图 → 老板表（固定 20 列格式）。
 
 用法:
-  python3 build_two_account_table.py --douyin 一号.json 二号.json --star 星图数据.json --out 表.xlsx
+  python3 build_two_account_table.py --douyin 一号.json 二号.json --star 星图数据_一号.json 星图数据_二号.json --out 表.xlsx
+
+1.2.188 起星图按账号各采一份，--star 接受多个文件；同一作品在多份文件里只计一次。
 
 约定（2026-10-20 用户拍板，必须照做）:
 - 20 列: 号|作品名称|发布时间|审核状态|播放量|星图有效播放|分成(元)|预估收益(元)|体裁|
@@ -32,18 +34,24 @@ def load(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--douyin", nargs="+", required=True, help="按 一号 二号 顺序给导出 JSON")
-    ap.add_argument("--star", default=None)
+    ap.add_argument("--star", nargs="*", default=None, help="每个账号一份星图 JSON，可多个")
     ap.add_argument("--labels", default=None, help="按文件顺序给号名，如 二号 或 一号,二号")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     labels = (a.labels.split(",") if a.labels else ["一号", "二号"])
     while len(labels) < len(a.douyin):
         labels.append("二号")
-    star = load(a.star) if a.star else []
-    pool = [{"title": norm(s.get("item_name")), "raw": s.get("item_name"),
-             "vv": num(s.get("valid_play")),
-             "share": num(s.get("share_amount") or s.get("author_reward_amount")), "used": False}
-            for s in star]
+    pool, seen = [], set()
+    for star_path in (a.star or []):
+        for s in load(star_path):
+            title, vv = norm(s.get("item_name")), num(s.get("valid_play"))
+            share = num(s.get("share_amount") or s.get("author_reward_amount"))
+            key = str(s.get("item_id") or "") or (title, vv, share)
+            if key in seen or (title, vv, share) in seen:
+                continue
+            seen.update({key, (title, vv, share)})
+            pool.append({"title": title, "raw": s.get("item_name"), "vv": vv,
+                         "share": share, "used": False})
     rows = []
     for idx, path in enumerate(a.douyin[:2]):
         for r in load(path):

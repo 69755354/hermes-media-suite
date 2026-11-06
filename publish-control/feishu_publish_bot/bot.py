@@ -37,9 +37,18 @@ if os.path.exists(_ENV_FILE):
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 CLI_PY = os.environ.get("CLI_PY", r"C:\\Users\\<USER>\\Desktop\\manju-publish-assistant-1\\manju-publish-assistant-1.2.34-win64\\runtime\\python.exe")
-LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or r"C:\Users\huang\AppData\Local"
+# 客户机（Windows）上的用户目录，例如 C:\Users\<客户机用户名>。部署时在 .env 里配置；
+# 代码里不写任何具体用户名。没配时路径里会出现 CLIENT_HOME_NOT_SET，报错一眼可见，
+# 不会悄悄落到别人的目录。各路径仍可用下面原有的单项环境变量单独覆盖。
+CLIENT_HOME = (os.environ.get("CLIENT_HOME") or "").rstrip("\\/")
+if not CLIENT_HOME:
+    print("[bot] CLIENT_HOME 未配置：请在 .env 加 CLIENT_HOME=C:\\Users\\<客户机用户名>",
+          file=sys.stderr)
+    CLIENT_HOME = r"C:\Users\CLIENT_HOME_NOT_SET"
+# 注意：这里是客户机的 LOCALAPPDATA，不读本机（云端 Linux）的环境变量。
+LOCALAPPDATA = os.environ.get("CLIENT_LOCALAPPDATA") or (CLIENT_HOME + r"\AppData\Local")
 WORKER_ROOT = (os.environ.get("WORKER_DATA_ROOT")
-               or r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker")
+               or LOCALAPPDATA + r"\HuolongAgent\publish-worker")
 PY_EXE = (os.environ.get("PY_EXE")
           or LOCALAPPDATA
           + r"\HuolongAgent\publish-worker\.venv\Scripts\python.exe")
@@ -1442,7 +1451,7 @@ def _client_exec_code(code, timeout=60, cwd=None, env=None):
 
 INBOX_SCAN = r"""
 import os,glob,json
-base=os.environ.get("BT_WORKER_BASE") or (os.environ.get("LOCALAPPDATA",r"C:\Users\huang\AppData\Local")+r"\HuolongAgent\publish-worker")
+base=os.environ.get("BT_WORKER_BASE") or (os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker")
 roots=[]
 def _add(p):
     if p and p not in roots: roots.append(p)
@@ -2415,13 +2424,56 @@ def ensure_browser(env="env_2", port=9225):
     ps = r"""
 $u='http://127.0.0.1:__PORT__/json/version'
 try { Invoke-WebRequest -UseBasicParsing $u -TimeoutSec 2 | Out-Null; Write-Output 'ALREADY'; exit 0 } catch {}
-$prof='C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\profiles\__ENV__'
+$prof=Join-Path $env:LOCALAPPDATA 'HuolongAgent\publish-worker\profiles\__ENV__'
 $chrome=Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'
 $c='"' + $chrome + '" --remote-debugging-port=__PORT__ --user-data-dir="' + $prof + '" --no-first-run --no-default-browser-check about:blank'
 Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c} | Out-Null
 for($i=0;$i -lt 25;$i++){ Start-Sleep -Seconds 1; try { Invoke-WebRequest -UseBasicParsing $u -TimeoutSec 2 | Out-Null; Write-Output 'CDP_UP'; break } catch {} }
 """.replace("__PORT__", str(port)).replace("__ENV__", env)
     return exec_shell(ps, timeout=90)
+
+
+_ORDINAL_LABELS = ("一号", "二号", "三号", "四号", "五号",
+                   "六号", "七号", "八号", "九号", "十号")
+
+
+def _ordinal_label(index):
+    return _ORDINAL_LABELS[index] if 0 <= index < len(_ORDINAL_LABELS) else "第%d号" % (index + 1)
+
+
+def _fetch_client_files(run, pattern, timeout=100):
+    """在客户机上按通配符取回文件，返回 [(文件名, 字节)]，按文件名排序。
+
+    先列文件名，再逐个取回：单个导出可能有几 MB，一次全塞进一条输出容易被截断。
+    """
+    import base64
+    def _marked(out, tag):
+        if isinstance(out, dict):
+            out = out.get("stdout") or ""
+        for ln in reversed((out or "").splitlines()):
+            ln = ln.strip()
+            if ln.startswith(tag):
+                return ln[len(tag):]
+        return ""
+    listing = ('import base64,glob,json,os;print("FILES:"+base64.b64encode(json.dumps('
+               '[f for f in sorted(glob.glob(r"%s"))]).encode()).decode())') % pattern
+    raw = _marked(run(listing, timeout=timeout), "FILES:")
+    try:
+        names = json.loads(base64.b64decode(raw).decode("utf-8")) if raw else []
+    except Exception:
+        names = []
+    files = []
+    for remote in names:
+        code = ('import base64;print("DATA:"+base64.b64encode(open(r"%s","rb").read()).decode())'
+                % remote)
+        data = _marked(run(code, timeout=timeout), "DATA:")
+        if not data:
+            continue
+        try:
+            files.append((remote.replace("\\", "/").rsplit("/", 1)[-1], base64.b64decode(data)))
+        except Exception:
+            continue
+    return files
 
 
 def collect_and_report(chat_id, customer_id=None):
@@ -2444,27 +2496,22 @@ def collect_and_report(chat_id, customer_id=None):
         import base64, subprocess, glob, time as _t
         base = os.path.join(customer_data_root(customer_id), "out")
         day = _t.strftime("%Y%m%d")
-        cands = [("/tmp/dy1.json", base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s_\u8721\u7b14\u65b0\u5c0f\u6f2b.json" % day, "\u4e00\u53f7"),
-                 ("/tmp/dy2.json", base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s_\u6f2b\u534a\u62cd.json" % day, "\u4e8c\u53f7")]
+        # \u6309\u5f53\u5929\u5b9e\u9645\u5bfc\u51fa\u7684\u6587\u4ef6\u679a\u4e3e\u8d26\u53f7\uff0c\u4e0d\u5199\u6b7b\u5ba2\u6237\u7684\u6296\u97f3\u6635\u79f0\uff1a\u6362\u5ba2\u6237\u3001\u52a0\u53f7\u90fd\u4e0d\u7528\u6539\u4ee3\u7801\u3002
         paths, labels, missing = [], [], []
-        for local, remote, label in cands:
-            code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % remote
-            dd = run_on_client(code, timeout=100)
-            b64 = next((ln.strip() for ln in reversed(dd.splitlines()) if re.fullmatch(r"[A-Za-z0-9+/=]{100,}", ln.strip() or "")), "")
-            if not b64:
-                missing.append(label)
-                continue
-            open(local, "wb").write(base64.b64decode(b64))
+        dy_files = _fetch_client_files(run_on_client, base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s*.json" % day)
+        for idx, (_name, blob) in enumerate(dy_files):
+            local = "/tmp/dy%d.json" % (idx + 1)
+            open(local, "wb").write(blob)
             paths.append(local)
-            labels.append(label)
-        star_ok = False
-        xt_remote = base + "\\xingtu\\\u661f\u56fe\u6570\u636e_%s.json" % day
-        code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % xt_remote
-        dd = run_on_client(code, timeout=100)
-        b64 = next((ln.strip() for ln in reversed(dd.splitlines()) if re.fullmatch(r"[A-Za-z0-9+/=]{100,}", ln.strip() or "")), "")
-        if b64:
-            open("/tmp/xt.json", "wb").write(base64.b64decode(b64))
-            star_ok = True
+            labels.append(_ordinal_label(idx))
+        # 1.2.188 \u8d77\u661f\u56fe\u6309\u8d26\u53f7\u5404\u4e00\u4efd\uff08\u661f\u56fe\u6570\u636e_<\u65e5\u671f>_<env>.json\uff09\uff0c\u5168\u90e8\u5e26\u4e0a\uff1b
+        # \u53ea\u53d6\u4e00\u4efd\u4f1a\u8ba9\u5176\u4ed6\u53f7\u7684\u661f\u56fe\u6709\u6548\u64ad\u653e\u6052\u4e3a 0\u3002
+        star_paths = []
+        for idx, (_name, blob) in enumerate(_fetch_client_files(run_on_client, base + "\\xingtu\\\u661f\u56fe\u6570\u636e_%s*.json" % day)):
+            local = "/tmp/xt%d.json" % (idx + 1)
+            open(local, "wb").write(blob)
+            star_paths.append(local)
+        star_ok = bool(star_paths)
         if not paths:
             reply(chat_id, "\u4e24\u4e2a\u53f7\u90fd\u6ca1\u5bfc\u51fa\u6570\u636e\uff08\u6ca1\u767b\u5f55\uff09\uff0c\u5148\u5728\u9762\u677f\u767b\u4e00\u4e0b\u3002")
             return
@@ -2472,7 +2519,7 @@ def collect_and_report(chat_id, customer_id=None):
         cmd = ["python3", BUILD_TWO_ACCOUNT,
                "--douyin"] + paths + ["--labels", ",".join(labels), "--out", out]
         if star_ok:
-            cmd += ["--star", "/tmp/xt.json"]
+            cmd += ["--star"] + star_paths
         subprocess.run(cmd, check=True, capture_output=True, timeout=120)
         send_file(chat_id, out)
         if missing:
@@ -2534,7 +2581,7 @@ def show_tasks(chat_id):
 
 PLAN_MAKER = r"""
 import os,glob,hashlib,json,datetime,random
-base=os.environ.get("LOCALAPPDATA",r"C:\Users\huang\AppData\Local")+r"\HuolongAgent\publish-worker"
+base=os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker"
 base=os.environ.get("BT_WORKER_BASE") or base
 inbox=os.path.join(base,"inbox")
 raw_files=json.loads(os.environ.get("BT_FILES") or "[]")
@@ -6445,9 +6492,9 @@ def handle_multitenant(chat_id, text):
 # 2026-10-23: bypass the legacy publish gate chain; call the verified one-shot
 # script on the customer machine (upload -> title -> tags -> AI declaration ->
 # star task -> recommended-frame cover -> publish).
-ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT", r"C:\Users\huang\publish_once.py")
-ONCE_PY = os.environ.get("ONCE_PY", r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\.venv\Scripts\python.exe")
-PUB_INBOX = os.environ.get("PUB_INBOX", r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\inbox")
+ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT") or CLIENT_HOME + r"\publish_once.py"
+ONCE_PY = os.environ.get("ONCE_PY") or WORKER_ROOT + r"\.venv\Scripts\python.exe"
+PUB_INBOX = os.environ.get("PUB_INBOX") or WORKER_ROOT + r"\inbox"
 ONCE_LEDGER = os.environ.get("ONCE_LEDGER", "/tmp/publish_once_done.json")
 ONCE_TAGS = os.environ.get("ONCE_TAGS", "#\u706b\u9f99\u6f2b\u5267|#\u6f2b\u5267|#\u817e\u8baf\u6f2b\u5267")
 ONCE_TASK = os.environ.get("ONCE_TASK", "\u514d\u8d39-\u65b0\u7801")
@@ -6461,8 +6508,8 @@ ONCE_MODE = {}
 ONCE_DELETE = {}
 ONCE_EDIT = {}
 PUB_RUNNING = set()
-EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT", r"C:\Users\huang\edit_work.py")
-DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT", r"C:\Users\huang\delete_work.py")
+EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT") or CLIENT_HOME + r"\edit_work.py"
+DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT") or CLIENT_HOME + r"\delete_work.py"
 ONCE_AWAIT_MODE = {}
 ONCE_STATE_FILE = os.environ.get("ONCE_STATE_FILE", "/tmp/publish_bot_state.json")
 
@@ -6732,7 +6779,7 @@ def verify_published(title, since_ts, timeout=420):
     """Re-read both douyin works lists and confirm the work really exists."""
     try:
         run_cli(["collect-all", "--skip-xingtu"], timeout=timeout)
-        base = r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\out\douyin"
+        base = WORKER_ROOT + r"\out\douyin"
         code = ("import glob,json,os,io;"
                 "fs=glob.glob(os.path.join(r'%s','*.json'));"
                 "fs.sort(key=os.path.getmtime,reverse=True);"
