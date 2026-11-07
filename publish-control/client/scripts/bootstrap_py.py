@@ -152,12 +152,16 @@ def _looks_like_product_dir(path) -> bool:
 
 
 def _version_tuple(text):
-    """Comparable numeric version, or None for an unparseable string."""
-    try:
-        parts = [int(p) for p in str(text).strip().split(".")[:4]]
-    except (TypeError, ValueError):
+    """Comparable numeric version, or None for an unparseable string.
+
+    Only the leading dotted numbers count, so "1.2.174-r2" compares as
+    (1, 2, 174).  Splitting on "." and int()-ing every part made such versions
+    unparseable, which switched off the "newer than this install" guard.
+    """
+    match = re.match(r"\s*(\d+(?:\.\d+){0,3})", str(text or ""))
+    if not match:
         return None
-    return tuple(parts) if parts else None
+    return tuple(int(p) for p in match.group(1).split("."))
 
 
 def _is_vendor_app_dir(path) -> bool:
@@ -946,7 +950,12 @@ def _purge_leftover_dirs(roots, keep, current_version, log, protected=()) -> int
             log("purge: skip %s (same version as this install)" % entry)
             return False
         have, want = _version_tuple(version), _version_tuple(current_version)
-        if have and want and have > want:
+        if have is None or want is None:
+            # Cannot prove it is older: deleting is irreversible, keep it.
+            log("purge: skip %s (version %r not comparable with %r)"
+                % (entry, version, current_version))
+            return False
+        if have >= want:
             log("purge: skip %s (newer than this install)" % entry)
             return False
         stopped = 0
@@ -1903,7 +1912,11 @@ class Installer:
                 self.log("  skip %s: same version as this install" % path)
                 continue
             have, want = _version_tuple(version), _version_tuple(self.version)
-            if have and want and have > want:
+            if have is None or want is None:
+                self.log("  skip %s: version %r not comparable with %r"
+                         % (path, version, self.version))
+                continue
+            if have >= want:
                 self.log("  skip %s: newer than this install" % path)
                 continue
             size = _tree_size(path)

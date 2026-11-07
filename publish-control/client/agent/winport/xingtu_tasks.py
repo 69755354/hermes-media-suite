@@ -1483,6 +1483,8 @@ def parse_card(card: dict) -> dict:
         "upload_url": upload_url,
         "lines": lines,
         "index": card.get("index"),
+        # Raw lines as listed; _JS_CLICK_CARD_TEXT re-identifies the card by them.
+        "card_lines": [str(x) for x in (card.get("lines") or [])],
         "buttons": list(card.get("buttons") or []),
     }
     return task
@@ -2002,26 +2004,19 @@ def finalize_readback(result: dict, readback: dict, *, mode: str = "publish") ->
     return result
 
 
-def _js_task_cards() -> str:
-    # selector-ok: scoped-unique
-    return r"""() => {
+# Task cards are found again on every call instead of being tagged with a
+# data-winport-* attribute: writing our own attributes into the platform's DOM
+# leaves a product-named trace the platform can see.  Identity across calls is
+# checked by the card's text lines (see _JS_CLICK_CARD_TEXT).
+# selector-ok: scoped-unique
+_JS_TASK_CARD_ROOTS = r"""
+  const __xingtuLines=(el)=>(el && el.innerText||'').split(/\n/).map(s=>s.trim()).filter(Boolean);
+  const __xingtuTaskCardRoots=()=>{
       const out=[], seen=new Set();
       const push=(root)=>{
         if(!root || seen.has(root)) return;
         seen.add(root);
-        const idx=out.length;
-        root.setAttribute('data-winport-task-card', String(idx));
-        const lines=(root.innerText||'').split(/\n/).map(s=>s.trim()).filter(Boolean);
-        const hrefs=[...root.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')||'');
-        const attrs=[];
-        root.querySelectorAll('*').forEach(el=>{
-          for(const a of (el.attributes||[])){
-            if(/order|task|data-/i.test(a.name)) attrs.push(a.name+'='+a.value);
-          }
-        });
-        const buttons=[...root.querySelectorAll('button,[role=button],a')]
-          .map(el=>(el.innerText||'').trim()).filter(Boolean);
-        out.push({index:idx, lines:lines, hrefs:hrefs, attrs:attrs, buttons:buttons});
+        out.push(root);
       };
       const labels=[...document.querySelectorAll('.indicator-label')];
       for(const label of labels){
@@ -2051,11 +2046,44 @@ def _js_task_cards() -> str:
         }
       }
       return out;
+  };
+"""
+
+
+def _js_task_cards() -> str:
+    return r"""() => {
+""" + _JS_TASK_CARD_ROOTS + r"""
+      return __xingtuTaskCardRoots().map((root, idx)=>{
+        const lines=__xingtuLines(root);
+        const hrefs=[...root.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')||'');
+        const attrs=[];
+        root.querySelectorAll('*').forEach(el=>{
+          for(const a of (el.attributes||[])){
+            if(/order|task|data-/i.test(a.name)) attrs.push(a.name+'='+a.value);
+          }
+        });
+        const buttons=[...root.querySelectorAll('button,[role=button],a')]
+          .map(el=>(el.innerText||'').trim()).filter(Boolean);
+        return {index:idx, lines:lines, hrefs:hrefs, attrs:attrs, buttons:buttons};
+      });
     }"""
 
 
 _JS_CLICK_CARD_TEXT = r"""(arg) => {
-  const card=document.querySelector('[data-winport-task-card="'+arg.index+'"]');
+""" + _JS_TASK_CARD_ROOTS + r"""
+  const cards=__xingtuTaskCardRoots();
+  // Identity check: the card must still carry the lines it was listed with.
+  // A re-render between listing and clicking shifts indexes; never click a
+  // different card than the one the caller chose.
+  let card=null;
+  if(Array.isArray(arg.lines) && arg.lines.length){
+    const want=arg.lines.join('\n');
+    const same=cards.filter(c=>__xingtuLines(c).join('\n')===want);
+    if(same.length===1) card=same[0];
+    else if(same.length>1 && same.indexOf(cards[arg.index])>=0) card=cards[arg.index];
+  } else {
+    card=cards[arg.index]||null;
+  }
   if(!card) return false;
   const nodes=[...card.querySelectorAll('button,[role=button],a')];
   let el=nodes.find(n=>(n.innerText||'').trim()===arg.text);
@@ -2078,9 +2106,10 @@ _JS_CLICK_TEXT = r"""(text) => {
 }"""
 
 _JS_CLICK_DETAIL_BY_TASK = r"""(name) => {
+""" + _JS_TASK_CARD_ROOTS + r"""
 """ + XINGTU_VISIBLE_CARD_NAME_JS + r"""
   const wanted=__xingtuNormalize(name);
-  const cards=[...document.querySelectorAll('[data-winport-task-card]')];
+  const cards=__xingtuTaskCardRoots();
   const matches=wanted ? cards.filter(c=>__xingtuCardName(c)===wanted) : [];
   if(matches.length!==1) return false;
   const card=matches[0];
@@ -2094,10 +2123,11 @@ _JS_CLICK_DETAIL_BY_TASK = r"""(name) => {
 
 
 _JS_CLICK_DETAIL_BY_ORDER = r"""(order) => {
+""" + _JS_TASK_CARD_ROOTS + r"""
 """ + XINGTU_VISIBLE_CARD_NAME_JS + r"""
   const value=String(order||'').trim();
   if(!value) return false;
-  const cards=[...document.querySelectorAll('[data-winport-task-card]')];
+  const cards=__xingtuTaskCardRoots();
   const matches=cards.filter(c=>{
     const ids=__xingtuCardOrderIds(c);
     return ids.length===1 && ids[0]===value;
@@ -2125,7 +2155,6 @@ def _js_list_rows() -> str:
       for(const root of rows){
         if(!root || !root.getClientRects().length) continue;
         const idx=out.length;
-        root.setAttribute('data-winport-task-row', String(idx));
         const lines=(root.innerText||'').split(/\n/).map(s=>s.trim()).filter(Boolean);
         const hrefs=[...root.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')||'');
         const attrs=[];
@@ -2154,22 +2183,6 @@ def _js_list_rows() -> str:
       }
       return out;
     }"""
-
-
-_JS_CLICK_ROW_DETAIL = r"""(index) => {
-  const norm=s=>(s||'').replace(/\s+/g,'');
-  const row=document.querySelector('[data-winport-task-row="'+index+'"]');
-  if(!row) return false;
-  const nodes=[...row.querySelectorAll('button,[role=button],a')];
-  let el=nodes.find(n=>norm(n.innerText)==='\u67e5\u770b\u8be6\u60c5');
-  if(!el) el=nodes.find(n=>norm(n.innerText).includes('\u67e5\u770b\u8be6\u60c5'));
-  if(!el) return false;
-  el.scrollIntoView({block:'center'});
-  el.click();
-  return true;
-}"""
-
-
 
 _JS_PICKER_LEAF = r"""(root, texts) => {
   const scope = (root && root.ownerDocument) || document;
@@ -2219,7 +2232,6 @@ _JS_PICKER_CARDS = r"""() => {
   const cards = Array.from(scope.querySelectorAll('div[class*="card-container-"]'))
       .filter(el => visible(el) && !/creator-layout/.test(String(el.className || '')));
   return cards.map((el, index) => {
-    el.setAttribute('data-winport-pick-card', String(index));
     const lines = String(el.innerText || el.textContent || '').split(/\n/).map(s => s.trim()).filter(Boolean);
     const nameEl = el.querySelector('[class*="task-name"]');
     let name = clean(nameEl ? (nameEl.innerText || nameEl.textContent || '') : '');
@@ -2358,7 +2370,8 @@ def _entry_from_task(context, page, task, *, timeout_ms=10000):
         return task
     target, clicked = _click_with_page_fallback(
         context, page, _JS_CLICK_CARD_TEXT,
-        {"index": index, "text": wanted}, timeout_ms=timeout_ms)
+        {"index": index, "text": wanted,
+         "lines": list(task.get("card_lines") or [])}, timeout_ms=timeout_ms)
     if not clicked or target is None:
         return task
     same_page_navigation = target is page

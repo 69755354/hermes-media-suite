@@ -6175,22 +6175,55 @@ def _mt_pick(d, text):
     return _dialog_reply(d, '\u5df2\u9009 %s\uff1b\u672c\u6279\u7528\u4ec0\u4e48\u8bdd\u9898\uff1f\u56de\u590d\u300c\u9ed8\u8ba4\u300d\u300c\u4e0d\u586b\u300d\u6216 #\u8bdd\u9898\uff0c\u6309\u6e05\u5355\u5e8f\u53f7\u8986\u76d6\u5982 2:#\u5355\u72ec\u8bdd\u9898\u3002' % ','.join(map(str, indexes)))
 
 
+_CN_DIGITS = {'\u4e00': 1, '\u4e8c': 2, '\u4e24': 2, '\u4e09': 3, '\u56db': 4, '\u4e94': 5,
+              '\u516d': 6, '\u4e03': 7, '\u516b': 8, '\u4e5d': 9, '\u5341': 10}
+
+
 def _pick_account(text, accounts):
-    t = str(text or '').strip()
-    m = re.fullmatch(r'\u7b2c?(\d{1,2})\s*(?:\u4e2a|\u53f7)?', t)
+    """\u5ba2\u6237\u56de\u7684\u8bdd \u2192 \u9009\u4e2d\u7684\u8d26\u53f7\uff1b\u62ff\u4e0d\u51c6\u5c31\u8fd4\u56de None\uff08\u5b81\u53ef\u518d\u95ee\u4e00\u6b21\uff0c\u4e5f\u4e0d\u53d1\u9519\u53f7\uff09\u3002
+
+    \u987a\u5e8f\uff1a\u6635\u79f0\u5b8c\u5168\u76f8\u540c \u2192 \u5e8f\u53f7\uff081 / \u7b2c2\u4e2a / \u4e8c\u53f7 / \u7b2c\u4e09\u4e2a\uff09\u2192 \u6635\u79f0\u5305\u542b\u5728\u56de\u590d\u91cc\u3002
+    \u5305\u542b\u5339\u914d\u53ea\u5728\u300c\u6700\u957f\u7684\u90a3\u4e2a\u6635\u79f0\u552f\u4e00\u300d\u65f6\u6210\u7acb\uff1a\u4e24\u4e2a\u53f7\u53eb\u300c\u5c0f\u6f2b\u300d\u300c\u5c0f\u6f2b\u5267\u573a\u300d\uff0c
+    \u5ba2\u6237\u56de\u300c\u5c0f\u6f2b\u5267\u573a\u300d\u5fc5\u987b\u9009\u540e\u8005\uff0c\u4e0d\u80fd\u56e0\u4e3a\u300c\u5c0f\u6f2b\u300d\u6392\u5728\u524d\u9762\u5c31\u9009\u9519\u3002
+    """
+    t = re.sub(r'\s+', '', str(text or ''))
+    if not t:
+        return None
+    named = [(a, str(a.get('nickname') or '').strip()) for a in accounts]
+    named = [(a, n) for a, n in named if n and n != '\u6296\u97f3']
+    exact = [a for a, n in named if re.sub(r'\s+', '', n) == t]
+    if len(exact) == 1:
+        return exact[0]
+    m = re.fullmatch(r'\u7b2c?(\d{1,2}|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])'
+                     r'(?:\u4e2a|\u53f7)?(?:\u53f7|\u8d26\u53f7)?', t)
     if m:
-        i = int(m.group(1))
-        if 1 <= i <= len(accounts):
-            return accounts[i - 1]
-    for a in accounts:
-        name = str(a.get('nickname') or '').strip()
-        if name and name != '\u6296\u97f3' and (t == name or (len(name) >= 2 and name in t)):
-            return a
-    return None
+        raw = m.group(1)
+        i = int(raw) if raw.isdigit() else _CN_DIGITS.get(raw, 0)
+        return accounts[i - 1] if 1 <= i <= len(accounts) else None
+    hits = [(a, n) for a, n in named if len(n) >= 2 and re.sub(r'\s+', '', n) in t]
+    if not hits:
+        return None
+    longest = max(len(n) for _, n in hits)
+    best = [a for a, n in hits if len(n) == longest]
+    return best[0] if len(best) == 1 else None
+
+
+def _selectable_accounts(d):
+    """\u80fd\u53d1\u7684\u53f7\uff1a\u542f\u7528\u4e14\u771f\u7684\u767b\u5f55\u8fc7\u3002
+
+    \u5ba2\u6237\u7aef materials \u65e9\u5c31\u6807\u4e86 logged_in\uff08\u7a7a\u73af\u5883\u4e0d\u7b97\u53f7\uff09\uff0c\u4ee5\u524d\u8fd9\u91cc\u6ca1\u770b\uff0c
+    \u53ea\u767b\u4e86\u4e00\u4e2a\u53f7\u7684\u7535\u8111\u4e5f\u4f1a\u88ab\u53cd\u590d\u8ffd\u95ee\u300c\u53d1\u54ea\u4e2a\u300d\u3002\u65e7\u5ba2\u6237\u7aef\u6ca1\u6709\u8be5\u5b57\u6bb5\uff0c\u6309\u5df2\u767b\u5f55\u5904\u7406\u3002
+    """
+    return [a for a in (d.get('accounts') or [])
+            if a.get('enabled', True) and a.get('logged_in', True)]
 
 
 def _mt_prepare_draft(d):
-    accounts = [a for a in (d.get('accounts') or []) if a.get('enabled', True)]
+    accounts = _selectable_accounts(d)
+    if len(accounts) == 1 and not d.get('account_env') and len(d.get('accounts') or []) > 1:
+        # \u58f0\u660e\u4e86\u591a\u4e2a\u73af\u5883\u4f46\u53ea\u6709\u4e00\u4e2a\u771f\u767b\u5f55\u8fc7\uff1a\u76f4\u63a5\u7528\u5b83\uff0c\u4e0d\u6253\u6270\u5ba2\u6237\u3002
+        d['account_env'] = accounts[0].get('env_id')
+        d['account_label'] = accounts[0].get('nickname')
     if len(accounts) > 1 and not d.get('account_env'):
         d['pending_accounts'] = accounts
         d['pre_account_status'] = d.get('status')
@@ -6362,6 +6395,13 @@ def handle_multitenant(chat_id, text):
         _dialog_save(d)
         if compact in MT_CANCEL_WORDS:
             return cancel_mt_batch(chat_id)
+        if (compact in ('重选账号', '换账号') and d.get('account_env')
+                and d.get('status') != 'awaiting_account' and len(_selectable_accounts(d)) > 1):
+            # 选完号之后也能改：清掉选择，重新问一次。
+            d.pop('account_env', None)
+            d.pop('account_label', None)
+            _dialog_save(d)
+            return _mt_prepare_draft(d)
         if d.get('status') == 'awaiting_account' and d.get('pending_accounts'):
             accs = d['pending_accounts']
             if compact in ('\u91cd\u9009\u8d26\u53f7', '\u6362\u8d26\u53f7'):

@@ -276,7 +276,7 @@ class PublishReceipt:
             except Exception: pass
         self.handlers=[]
         if getattr(self,'observer_name',None):
-            try: self.page.evaluate("name => window[name+'Stop']?.()",self.observer_name)
+            try: self.page.evaluate("name => window[Symbol.for(name)]?.stop?.()",self.observer_name)
             except Exception: pass
         if self.cdp is not None:
             if getattr(self,'observer_script_id',None):
@@ -311,8 +311,10 @@ VISIBLE_TEXT_SCRIPT = r'''root => {
 # Only reads DOM and reports diagnostics; never writes platform evidence.
 MONITOR_SCRIPT = r'''(() => {
  const name=__BINDING__, failures=__FAILURES__;
- if(window[name+'Installed']) return;
- window[name+'Installed']=true;
+ // State lives under a Symbol key: Object.keys / for-in on window do not list it.
+ const key=Symbol.for(name);
+ if(window[key]) return;
+ window[key]={};
  const report=s=>{ if(typeof window[name]==='function') window[name](s); };
  const failed=text=>failures.find(s=>(text||'').includes(s));
  const renderedText=(__VISIBLE_TEXT__);
@@ -330,11 +332,13 @@ MONITOR_SCRIPT = r'''(() => {
  });
  observer.observe(document,{subtree:true,childList:true,characterData:true,attributes:true});
  inspect();const timer=setInterval(inspect,100);
- window[name+'Stop']=()=>{observer.disconnect();clearInterval(timer);};
+ window[key].stop=()=>{observer.disconnect();clearInterval(timer);};
 })();'''
 
 def install_monitor(page,receipt,failure_markers):
-    name='_publishMonitor_'+uuid.uuid4().hex
+    # Random, product-neutral name: expose_binding has to add one window
+    # function, so it must not say what it is.
+    name='_'+uuid.uuid4().hex[:16]
     page.expose_binding(name,lambda source,reason: receipt.observe_page_failure(reason)
                         if source.get('frame')==page.main_frame else None)
     script=MONITOR_SCRIPT.replace('__BINDING__',json.dumps(name)).replace('__FAILURES__',json.dumps(list(failure_markers))).replace('__VISIBLE_TEXT__',VISIBLE_TEXT_SCRIPT)
