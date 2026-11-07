@@ -1451,7 +1451,7 @@ def _client_exec_code(code, timeout=60, cwd=None, env=None):
 
 INBOX_SCAN = r"""
 import os,glob,json
-base=os.environ.get("BT_WORKER_BASE") or (os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker")
+base=os.environ.get("BT_WORKER_BASE") or ((os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local"))+r"\HuolongAgent\publish-worker")
 roots=[]
 def _add(p):
     if p and p not in roots: roots.append(p)
@@ -2581,7 +2581,7 @@ def show_tasks(chat_id):
 
 PLAN_MAKER = r"""
 import os,glob,hashlib,json,datetime,random
-base=os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker"
+base=(os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local"))+r"\HuolongAgent\publish-worker"
 base=os.environ.get("BT_WORKER_BASE") or base
 inbox=os.path.join(base,"inbox")
 raw_files=json.loads(os.environ.get("BT_FILES") or "[]")
