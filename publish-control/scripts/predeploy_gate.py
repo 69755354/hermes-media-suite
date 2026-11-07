@@ -16,9 +16,9 @@
   真机发布验收仍是「真发出一条带星图任务的」。
 """
 import argparse
+import os
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,8 +39,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--customer")
-    ap.add_argument("--program-path", default=os.environ.get("PROGRAM_PATH") or "",
-                    help="客户机安装目录；也可用 PROGRAM_PATH 环境变量")
+    ap.add_argument("--program-path",
+                    default=os.environ.get("CLIENT_PROGRAM_PATH") or None,
+                    help="客户机上的程序目录；默认读环境变量 CLIENT_PROGRAM_PATH")
     ns = ap.parse_args(argv)
     root = Path(ns.build_dir).resolve()
     problems = []
@@ -64,7 +65,9 @@ def main(argv=None) -> int:
     if entry.get("sha256") != local_sha or entry.get("bytes") != exe.stat().st_size:
         problems.append("MANIFEST 里 publish_exec.py 的 bytes/sha256 与文件不一致（需重跑 build_bundle）")
 
-    if ns.customer:
+    if ns.customer and not ns.program_path:
+        problems.append("核对客户机现网文件需要 --program-path（或环境变量 CLIENT_PROGRAM_PATH）")
+    elif ns.customer:
         prog = subprocess.run(
             ["python3", str(PROJECT / "remote_pc.py"), "exec", "--customer", ns.customer,
              "--timeout", "60", "--", "cmd", "/c", "certutil", "-hashfile",

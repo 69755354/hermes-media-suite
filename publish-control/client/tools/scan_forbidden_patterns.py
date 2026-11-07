@@ -71,9 +71,12 @@ SCAN_SKIP_FILES = {
 # Continuous terminal-state observation requires this read-only init script.
 # This exception binds the exact installer AST and script bytes; it is not a
 # file exemption. Extra calls, script mutations, and every other init script fail.
-MONITOR_INSTALLER_SHA256 = "176849c1ff54b3d3b58a338748599e9ac3c24ac5e2d9655913c5e79cf16d20f3"
+# sha256 of install_monitor's source text (CRLF->LF). Source text, not ast.dump():
+# ast.dump() output changes between Python versions (3.11 vs 3.13), which made
+# the same code pass on 3.11 and fail on 3.13+.
+MONITOR_INSTALLER_SHA256 = "8f188a22421f033062547967e84c31fe9bb31f710212d98a5a0add5c7fa97ca1"
 VISIBLE_TEXT_SHA256 = "39ca5452b2f0cd8f1c08c879eb2d5e21d98a024082803b3ccec1100a6b7c5588"
-MONITOR_SCRIPT_SHA256 = "21eac1f2d57c1b6ebce61e78848bf76a3a7c7b3a68ceeb49f652e98050a0e7c2"
+MONITOR_SCRIPT_SHA256 = "d7a0ae6bd60c8659c516fc94da5c71274d508e2c467ddd4041d15e60346745c8"
 
 
 def read_only_monitor_allowed(rel, text):
@@ -88,7 +91,7 @@ def read_only_monitor_allowed(rel, text):
                    any(isinstance(t, ast.Name) and t.id == "VISIBLE_TEXT_SCRIPT" for t in n.targets)]
         return (len(functions) == len(scripts) == len(readers) == 1 and
                 hashlib.sha256(readers[0].encode()).hexdigest() == VISIBLE_TEXT_SHA256 and
-                hashlib.sha256(ast.dump(functions[0], include_attributes=False).encode()).hexdigest() == MONITOR_INSTALLER_SHA256 and
+                hashlib.sha256((ast.get_source_segment(text, functions[0]) or "").replace("\r\n", "\n").encode()).hexdigest() == MONITOR_INSTALLER_SHA256 and
                 hashlib.sha256(scripts[0].encode()).hexdigest() == MONITOR_SCRIPT_SHA256)
     except Exception:
         return False

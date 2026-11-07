@@ -1378,7 +1378,7 @@ def _extract_upload_resource_ids(body):
 
 
 def _video_preview_baseline(page):
-    """Tag every pre-existing video and record the visible baseline."""
+    """Record the visible pre-existing videos (count + sources) without touching the DOM."""
     try:
         value = page.evaluate("""/* winport-video-baseline */ () => {
           const visible = el => {
@@ -1394,7 +1394,6 @@ def _video_preview_baseline(page):
           const sources = [];
           let count = 0;
           for (const video of Array.from(document.querySelectorAll('video'))) {
-            video.setAttribute('data-winport-video-baseline', token);
             if (!visible(video)) continue;
             count += 1;
             const source = String(video.currentSrc || video.src ||

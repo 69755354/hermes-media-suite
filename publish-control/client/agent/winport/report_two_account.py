@@ -43,19 +43,67 @@ def _write_xlsx(path: Path, rows: list, header: list) -> None:
     write_xlsx(path, [header] + rows, sheet_name="两个号作品+星图")
 
 
-def build(layout, day: str | None = None) -> dict:
-    day = day or datetime.now().strftime("%Y-%m-%d")
-    star_files = sorted(layout.out_xingtu.glob(f"星图数据_{day}*.json"))
-    if not star_files:
-        star_files = sorted(layout.out_xingtu.glob("星图数据_*.json"))
-    pool = []
-    for item in (_load(star_files[-1]) if star_files else []):
-        pool.append({"title": _norm(item.get("item_name")), "raw": item.get("item_name"),
-                     "vv": _num(item.get("valid_play")),
-                     "share": _num(item.get("share_amount") or item.get("author_reward_amount")),
-                     "used": False})
+_DAY_TOKEN = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{8})")
 
-    douyin_files = sorted(layout.out_douyin.glob(f"作品列表导出_*{day}*.json"))
+
+def _day_forms(day: str) -> set:
+    """Collectors write YYYYMMDD; older callers pass YYYY-MM-DD.  Accept both."""
+    compact = str(day).replace("-", "")
+    forms = {str(day), compact}
+    if len(compact) == 8 and compact.isdigit():
+        forms.add(f"{compact[:4]}-{compact[4:6]}-{compact[6:]}")
+    return forms
+
+
+def _star_files(folder: Path, day: str) -> list:
+    """Every account's Xingtu file for ``day`` (one per account since 1.2.188).
+
+    No file for that day -> all files of the most recent day on disk, never a
+    single arbitrary file: picking one file is what left an account at 0.
+    """
+    files = set()
+    for form in _day_forms(day):
+        files.update(folder.glob(f"星图数据_{form}*.json"))
+    if files:
+        return sorted(files)
+    by_day = {}
+    for path in folder.glob("星图数据_*.json"):
+        found = _DAY_TOKEN.search(path.name)
+        if found:
+            by_day.setdefault(found.group(1).replace("-", ""), []).append(path)
+    return sorted(by_day[max(by_day)]) if by_day else []
+
+
+def _star_pool(paths) -> list:
+    pool, seen = [], set()
+    for path in paths:
+        try:
+            doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        owner = _norm(doc.get("name")) if isinstance(doc, dict) else ""
+        for item in _load(path):
+            vv = _num(item.get("valid_play"))
+            share = _num(item.get("share_amount") or item.get("author_reward_amount"))
+            title = _norm(item.get("item_name"))
+            # Same work seen twice (rerun, or a pre-1.2.188 unsuffixed file
+            # next to the per-account ones) must count once.
+            key = str(item.get("item_id") or "") or (title, vv, share)
+            if key in seen or (title, vv, share) in seen:
+                continue
+            seen.add(key)
+            seen.add((title, vv, share))
+            pool.append({"title": title, "raw": item.get("item_name"), "owner": owner,
+                         "vv": vv, "share": share, "used": False})
+    return pool
+
+
+def build(layout, day: str | None = None, *, today: str | None = None) -> dict:
+    day = day or today or datetime.now().strftime("%Y%m%d")
+    pool = _star_pool(_star_files(layout.out_xingtu, day))
+
+    douyin_files = sorted({p for form in _day_forms(day)
+                           for p in layout.out_douyin.glob(f"作品列表导出_*{form}*.json")})
     account_order = []
     for path in douyin_files:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -69,16 +117,20 @@ def build(layout, day: str | None = None) -> dict:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         account = str(data.get("account_name") or "")
         label = labels.get(account) or account or _ordinal_label(len(account_order))
+        owner = _norm(account)
         for r in data.get("records") or []:
             title = _norm(r.get("作品名称"))
             match = None
-            exact = [c for c in pool if not c["used"] and c["title"] == title]
-            if exact:
-                match = exact[0]
-            else:
-                near = [c for c in pool if not c["used"] and title[:14] and c["title"][:14] == title[:14]]
+            # Prefer this account's own Xingtu items, then any account's.
+            for cands in ([c for c in pool if c["owner"] and c["owner"] == owner], pool):
+                exact = [c for c in cands if not c["used"] and c["title"] == title]
+                if exact:
+                    match = exact[0]
+                    break
+                near = [c for c in cands if not c["used"] and title[:14] and c["title"][:14] == title[:14]]
                 if len(near) == 1:
                     match = near[0]
+                    break
             if match:
                 match["used"] = True
             rows.append([label, r.get("作品名称", ""), r.get("发布时间", ""), r.get("审核状态", ""),
@@ -90,8 +142,9 @@ def build(layout, day: str | None = None) -> dict:
                          _num(r.get("主页访问量")), _num(r.get("粉丝增量"))])
     star_label = (labels.get(account_order[1]) if len(account_order) > 1
                   else "未匹配")
+    owner_labels = {_norm(name): lab for name, lab in labels.items()}
     for c in [x for x in pool if not x["used"] and x["share"] > 0]:
-        rows.append([star_label, c["raw"], "", "", 0, c["vv"], c["share"], 0,
+        rows.append([owner_labels.get(c["owner"], star_label), c["raw"], "", "", 0, c["vv"], c["share"], 0,
                      "", "", "", "", "", "", "", "", "", "", "", ""])
     rows.sort(key=lambda x: x[4], reverse=True)
     label_counts = {}
@@ -103,7 +156,8 @@ def build(layout, day: str | None = None) -> dict:
                  sum(r[4] for r in rows), sum(r[5] for r in rows),
                  round(sum(r[6] for r in rows), 2), 0,
                  "", "", "", "", "", "", "", "", "", "", "", ""])
-    out = layout.out_reports / f"两个号作品_星图_{day}.xlsx"
+    shown = max(_day_forms(day), key=lambda f: ("-" in f, len(f)))  # 文件名保持 YYYY-MM-DD
+    out = layout.out_reports / f"两个号作品_星图_{shown}.xlsx"
     out.parent.mkdir(parents=True, exist_ok=True)
     _write_xlsx(out, rows, HEADERS)
     return {"xlsx": str(out), "rows": len(rows) - 1,

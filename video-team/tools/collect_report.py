@@ -39,34 +39,29 @@ def main():
 
     base = os.path.join(bot.customer_data_root(None), "out")
     day = time.strftime("%Y%m%d")
-    cands = [("/tmp/dy1.json", base + "\\douyin\\作品列表导出_%s_蜡笔新小漫.json" % day, "一号"),
-             ("/tmp/dy2.json", base + "\\douyin\\作品列表导出_%s_漫半拍.json" % day, "二号")]
+    # 按当天实际导出的文件枚举账号，不写死客户昵称（与 bot.collect_and_report 同一逻辑）。
     paths, labels, missing = [], [], []
-    for local, remote, label in cands:
-        code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % remote
-        dd = bot.run_on_client(code, timeout=100)
-        b64 = _b64_from(dd if isinstance(dd, str) else (dd.get("stdout") or ""))
-        if not b64:
-            missing.append(label)
-            continue
-        open(local, "wb").write(base64.b64decode(b64))
-        paths.append(local); labels.append(label)
+    for idx, (_name, blob) in enumerate(bot._fetch_client_files(
+            bot.run_on_client, base + "\\douyin\\作品列表导出_%s*.json" % day)):
+        local = "/tmp/dy%d.json" % (idx + 1)
+        open(local, "wb").write(blob)
+        paths.append(local); labels.append(bot._ordinal_label(idx))
     if not paths:
-        print("FAIL: 两个号都没导出数据（客户机没登录或不可达）：%s" % "、".join(missing))
+        print("FAIL: 今天没有任何账号的作品导出（客户机没登录或不可达）")
         return 2
 
-    star_ok = False
-    xt_remote = base + "\\xingtu\\星图数据_%s.json" % day
-    code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % xt_remote
-    dd = bot.run_on_client(code, timeout=100)
-    b64 = _b64_from(dd if isinstance(dd, str) else (dd.get("stdout") or ""))
-    if b64:
-        open("/tmp/xt.json", "wb").write(base64.b64decode(b64)); star_ok = True
+    # 1.2.188 起星图每个账号一份，全部带上。
+    star_paths = []
+    for idx, (_name, blob) in enumerate(bot._fetch_client_files(
+            bot.run_on_client, base + "\\xingtu\\星图数据_%s*.json" % day)):
+        local = "/tmp/xt%d.json" % (idx + 1)
+        open(local, "wb").write(blob); star_paths.append(local)
+    star_ok = bool(star_paths)
 
     out = os.path.join(a.out_dir, "两个号作品_%s.xlsx" % day)
     cmd = ["python3", BUILD, "--douyin"] + paths + ["--labels", ",".join(labels), "--out", out]
     if star_ok:
-        cmd += ["--star", "/tmp/xt.json"]
+        cmd += ["--star"] + star_paths
     subprocess.run(cmd, check=True, capture_output=True, timeout=120)
     if missing:
         print("NOTE: %s 没登录没取到，表里只有 %s" % ("、".join(missing), "、".join(labels)))

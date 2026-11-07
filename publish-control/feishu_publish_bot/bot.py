@@ -37,10 +37,18 @@ if os.path.exists(_ENV_FILE):
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 CLI_PY = os.environ.get("CLI_PY", r"C:\\Users\\<USER>\\Desktop\\manju-publish-assistant-1\\manju-publish-assistant-1.2.34-win64\\runtime\\python.exe")
-USER_HOME = os.environ.get("USER_HOME") or os.path.expanduser("~")
-LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or os.path.join(USER_HOME, "AppData", "Local")
-WORKER_ROOT = (os.environ.get("WORKER_DATA_ROOT") or os.environ.get("WORKER_BASE")
-               or os.path.join(LOCALAPPDATA, "HuolongAgent", "publish-worker"))
+# 客户机（Windows）上的用户目录，例如 C:\Users\<客户机用户名>。部署时在 .env 里配置；
+# 代码里不写任何具体用户名。没配时路径里会出现 CLIENT_HOME_NOT_SET，报错一眼可见，
+# 不会悄悄落到别人的目录。各路径仍可用下面原有的单项环境变量单独覆盖。
+CLIENT_HOME = (os.environ.get("CLIENT_HOME") or "").rstrip("\\/")
+if not CLIENT_HOME:
+    print("[bot] CLIENT_HOME 未配置：请在 .env 加 CLIENT_HOME=C:\\Users\\<客户机用户名>",
+          file=sys.stderr)
+    CLIENT_HOME = r"C:\Users\CLIENT_HOME_NOT_SET"
+# 注意：这里是客户机的 LOCALAPPDATA，不读本机（云端 Linux）的环境变量。
+LOCALAPPDATA = os.environ.get("CLIENT_LOCALAPPDATA") or (CLIENT_HOME + r"\AppData\Local")
+WORKER_ROOT = (os.environ.get("WORKER_DATA_ROOT")
+               or LOCALAPPDATA + r"\HuolongAgent\publish-worker")
 PY_EXE = (os.environ.get("PY_EXE")
           or LOCALAPPDATA
           + r"\HuolongAgent\publish-worker\.venv\Scripts\python.exe")
@@ -1443,7 +1451,7 @@ def _client_exec_code(code, timeout=60, cwd=None, env=None):
 
 INBOX_SCAN = r"""
 import os,glob,json
-base=os.environ.get("BT_WORKER_BASE") or os.environ.get("WORKER_BASE") or os.path.join(os.environ["LOCALAPPDATA"],"HuolongAgent","publish-worker")
+base=os.environ.get("BT_WORKER_BASE") or (os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker")
 roots=[]
 def _add(p):
     if p and p not in roots: roots.append(p)
@@ -2425,6 +2433,49 @@ for($i=0;$i -lt 25;$i++){ Start-Sleep -Seconds 1; try { Invoke-WebRequest -UseBa
     return exec_shell(ps, timeout=90)
 
 
+_ORDINAL_LABELS = ("一号", "二号", "三号", "四号", "五号",
+                   "六号", "七号", "八号", "九号", "十号")
+
+
+def _ordinal_label(index):
+    return _ORDINAL_LABELS[index] if 0 <= index < len(_ORDINAL_LABELS) else "第%d号" % (index + 1)
+
+
+def _fetch_client_files(run, pattern, timeout=100):
+    """在客户机上按通配符取回文件，返回 [(文件名, 字节)]，按文件名排序。
+
+    先列文件名，再逐个取回：单个导出可能有几 MB，一次全塞进一条输出容易被截断。
+    """
+    import base64
+    def _marked(out, tag):
+        if isinstance(out, dict):
+            out = out.get("stdout") or ""
+        for ln in reversed((out or "").splitlines()):
+            ln = ln.strip()
+            if ln.startswith(tag):
+                return ln[len(tag):]
+        return ""
+    listing = ('import base64,glob,json,os;print("FILES:"+base64.b64encode(json.dumps('
+               '[f for f in sorted(glob.glob(r"%s"))]).encode()).decode())') % pattern
+    raw = _marked(run(listing, timeout=timeout), "FILES:")
+    try:
+        names = json.loads(base64.b64decode(raw).decode("utf-8")) if raw else []
+    except Exception:
+        names = []
+    files = []
+    for remote in names:
+        code = ('import base64;print("DATA:"+base64.b64encode(open(r"%s","rb").read()).decode())'
+                % remote)
+        data = _marked(run(code, timeout=timeout), "DATA:")
+        if not data:
+            continue
+        try:
+            files.append((remote.replace("\\", "/").rsplit("/", 1)[-1], base64.b64decode(data)))
+        except Exception:
+            continue
+    return files
+
+
 def collect_and_report(chat_id, customer_id=None):
     try:
         ensure_browser("env_2", 9225)
@@ -2445,27 +2496,22 @@ def collect_and_report(chat_id, customer_id=None):
         import base64, subprocess, glob, time as _t
         base = os.path.join(customer_data_root(customer_id), "out")
         day = _t.strftime("%Y%m%d")
-        cands = [("/tmp/dy1.json", base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s_\u8721\u7b14\u65b0\u5c0f\u6f2b.json" % day, "\u4e00\u53f7"),
-                 ("/tmp/dy2.json", base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s_\u6f2b\u534a\u62cd.json" % day, "\u4e8c\u53f7")]
+        # \u6309\u5f53\u5929\u5b9e\u9645\u5bfc\u51fa\u7684\u6587\u4ef6\u679a\u4e3e\u8d26\u53f7\uff0c\u4e0d\u5199\u6b7b\u5ba2\u6237\u7684\u6296\u97f3\u6635\u79f0\uff1a\u6362\u5ba2\u6237\u3001\u52a0\u53f7\u90fd\u4e0d\u7528\u6539\u4ee3\u7801\u3002
         paths, labels, missing = [], [], []
-        for local, remote, label in cands:
-            code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % remote
-            dd = run_on_client(code, timeout=100)
-            b64 = next((ln.strip() for ln in reversed(dd.splitlines()) if re.fullmatch(r"[A-Za-z0-9+/=]{100,}", ln.strip() or "")), "")
-            if not b64:
-                missing.append(label)
-                continue
-            open(local, "wb").write(base64.b64decode(b64))
+        dy_files = _fetch_client_files(run_on_client, base + "\\douyin\\\u4f5c\u54c1\u5217\u8868\u5bfc\u51fa_%s*.json" % day)
+        for idx, (_name, blob) in enumerate(dy_files):
+            local = "/tmp/dy%d.json" % (idx + 1)
+            open(local, "wb").write(blob)
             paths.append(local)
-            labels.append(label)
-        star_ok = False
-        xt_remote = base + "\\xingtu\\\u661f\u56fe\u6570\u636e_%s.json" % day
-        code = 'import base64;print(base64.b64encode(open(r"%s","rb").read()).decode())' % xt_remote
-        dd = run_on_client(code, timeout=100)
-        b64 = next((ln.strip() for ln in reversed(dd.splitlines()) if re.fullmatch(r"[A-Za-z0-9+/=]{100,}", ln.strip() or "")), "")
-        if b64:
-            open("/tmp/xt.json", "wb").write(base64.b64decode(b64))
-            star_ok = True
+            labels.append(_ordinal_label(idx))
+        # 1.2.188 \u8d77\u661f\u56fe\u6309\u8d26\u53f7\u5404\u4e00\u4efd\uff08\u661f\u56fe\u6570\u636e_<\u65e5\u671f>_<env>.json\uff09\uff0c\u5168\u90e8\u5e26\u4e0a\uff1b
+        # \u53ea\u53d6\u4e00\u4efd\u4f1a\u8ba9\u5176\u4ed6\u53f7\u7684\u661f\u56fe\u6709\u6548\u64ad\u653e\u6052\u4e3a 0\u3002
+        star_paths = []
+        for idx, (_name, blob) in enumerate(_fetch_client_files(run_on_client, base + "\\xingtu\\\u661f\u56fe\u6570\u636e_%s*.json" % day)):
+            local = "/tmp/xt%d.json" % (idx + 1)
+            open(local, "wb").write(blob)
+            star_paths.append(local)
+        star_ok = bool(star_paths)
         if not paths:
             reply(chat_id, "\u4e24\u4e2a\u53f7\u90fd\u6ca1\u5bfc\u51fa\u6570\u636e\uff08\u6ca1\u767b\u5f55\uff09\uff0c\u5148\u5728\u9762\u677f\u767b\u4e00\u4e0b\u3002")
             return
@@ -2473,7 +2519,7 @@ def collect_and_report(chat_id, customer_id=None):
         cmd = ["python3", BUILD_TWO_ACCOUNT,
                "--douyin"] + paths + ["--labels", ",".join(labels), "--out", out]
         if star_ok:
-            cmd += ["--star", "/tmp/xt.json"]
+            cmd += ["--star"] + star_paths
         subprocess.run(cmd, check=True, capture_output=True, timeout=120)
         send_file(chat_id, out)
         if missing:
@@ -2535,7 +2581,8 @@ def show_tasks(chat_id):
 
 PLAN_MAKER = r"""
 import os,glob,hashlib,json,datetime,random
-base=os.environ.get("BT_WORKER_BASE") or os.environ.get("WORKER_BASE") or os.path.join(os.environ["LOCALAPPDATA"],"HuolongAgent","publish-worker")
+base=os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")+r"\HuolongAgent\publish-worker"
+base=os.environ.get("BT_WORKER_BASE") or base
 inbox=os.path.join(base,"inbox")
 raw_files=json.loads(os.environ.get("BT_FILES") or "[]")
 if raw_files:
@@ -6128,22 +6175,55 @@ def _mt_pick(d, text):
     return _dialog_reply(d, '\u5df2\u9009 %s\uff1b\u672c\u6279\u7528\u4ec0\u4e48\u8bdd\u9898\uff1f\u56de\u590d\u300c\u9ed8\u8ba4\u300d\u300c\u4e0d\u586b\u300d\u6216 #\u8bdd\u9898\uff0c\u6309\u6e05\u5355\u5e8f\u53f7\u8986\u76d6\u5982 2:#\u5355\u72ec\u8bdd\u9898\u3002' % ','.join(map(str, indexes)))
 
 
+_CN_DIGITS = {'\u4e00': 1, '\u4e8c': 2, '\u4e24': 2, '\u4e09': 3, '\u56db': 4, '\u4e94': 5,
+              '\u516d': 6, '\u4e03': 7, '\u516b': 8, '\u4e5d': 9, '\u5341': 10}
+
+
 def _pick_account(text, accounts):
-    t = str(text or '').strip()
-    m = re.fullmatch(r'\u7b2c?(\d{1,2})\s*(?:\u4e2a|\u53f7)?', t)
+    """\u5ba2\u6237\u56de\u7684\u8bdd \u2192 \u9009\u4e2d\u7684\u8d26\u53f7\uff1b\u62ff\u4e0d\u51c6\u5c31\u8fd4\u56de None\uff08\u5b81\u53ef\u518d\u95ee\u4e00\u6b21\uff0c\u4e5f\u4e0d\u53d1\u9519\u53f7\uff09\u3002
+
+    \u987a\u5e8f\uff1a\u6635\u79f0\u5b8c\u5168\u76f8\u540c \u2192 \u5e8f\u53f7\uff081 / \u7b2c2\u4e2a / \u4e8c\u53f7 / \u7b2c\u4e09\u4e2a\uff09\u2192 \u6635\u79f0\u5305\u542b\u5728\u56de\u590d\u91cc\u3002
+    \u5305\u542b\u5339\u914d\u53ea\u5728\u300c\u6700\u957f\u7684\u90a3\u4e2a\u6635\u79f0\u552f\u4e00\u300d\u65f6\u6210\u7acb\uff1a\u4e24\u4e2a\u53f7\u53eb\u300c\u5c0f\u6f2b\u300d\u300c\u5c0f\u6f2b\u5267\u573a\u300d\uff0c
+    \u5ba2\u6237\u56de\u300c\u5c0f\u6f2b\u5267\u573a\u300d\u5fc5\u987b\u9009\u540e\u8005\uff0c\u4e0d\u80fd\u56e0\u4e3a\u300c\u5c0f\u6f2b\u300d\u6392\u5728\u524d\u9762\u5c31\u9009\u9519\u3002
+    """
+    t = re.sub(r'\s+', '', str(text or ''))
+    if not t:
+        return None
+    named = [(a, str(a.get('nickname') or '').strip()) for a in accounts]
+    named = [(a, n) for a, n in named if n and n != '\u6296\u97f3']
+    exact = [a for a, n in named if re.sub(r'\s+', '', n) == t]
+    if len(exact) == 1:
+        return exact[0]
+    m = re.fullmatch(r'\u7b2c?(\d{1,2}|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])'
+                     r'(?:\u4e2a|\u53f7)?(?:\u53f7|\u8d26\u53f7)?', t)
     if m:
-        i = int(m.group(1))
-        if 1 <= i <= len(accounts):
-            return accounts[i - 1]
-    for a in accounts:
-        name = str(a.get('nickname') or '').strip()
-        if name and name != '\u6296\u97f3' and (t == name or (len(name) >= 2 and name in t)):
-            return a
-    return None
+        raw = m.group(1)
+        i = int(raw) if raw.isdigit() else _CN_DIGITS.get(raw, 0)
+        return accounts[i - 1] if 1 <= i <= len(accounts) else None
+    hits = [(a, n) for a, n in named if len(n) >= 2 and re.sub(r'\s+', '', n) in t]
+    if not hits:
+        return None
+    longest = max(len(n) for _, n in hits)
+    best = [a for a, n in hits if len(n) == longest]
+    return best[0] if len(best) == 1 else None
+
+
+def _selectable_accounts(d):
+    """\u80fd\u53d1\u7684\u53f7\uff1a\u542f\u7528\u4e14\u771f\u7684\u767b\u5f55\u8fc7\u3002
+
+    \u5ba2\u6237\u7aef materials \u65e9\u5c31\u6807\u4e86 logged_in\uff08\u7a7a\u73af\u5883\u4e0d\u7b97\u53f7\uff09\uff0c\u4ee5\u524d\u8fd9\u91cc\u6ca1\u770b\uff0c
+    \u53ea\u767b\u4e86\u4e00\u4e2a\u53f7\u7684\u7535\u8111\u4e5f\u4f1a\u88ab\u53cd\u590d\u8ffd\u95ee\u300c\u53d1\u54ea\u4e2a\u300d\u3002\u65e7\u5ba2\u6237\u7aef\u6ca1\u6709\u8be5\u5b57\u6bb5\uff0c\u6309\u5df2\u767b\u5f55\u5904\u7406\u3002
+    """
+    return [a for a in (d.get('accounts') or [])
+            if a.get('enabled', True) and a.get('logged_in', True)]
 
 
 def _mt_prepare_draft(d):
-    accounts = [a for a in (d.get('accounts') or []) if a.get('enabled', True)]
+    accounts = _selectable_accounts(d)
+    if len(accounts) == 1 and not d.get('account_env') and len(d.get('accounts') or []) > 1:
+        # \u58f0\u660e\u4e86\u591a\u4e2a\u73af\u5883\u4f46\u53ea\u6709\u4e00\u4e2a\u771f\u767b\u5f55\u8fc7\uff1a\u76f4\u63a5\u7528\u5b83\uff0c\u4e0d\u6253\u6270\u5ba2\u6237\u3002
+        d['account_env'] = accounts[0].get('env_id')
+        d['account_label'] = accounts[0].get('nickname')
     if len(accounts) > 1 and not d.get('account_env'):
         d['pending_accounts'] = accounts
         d['pre_account_status'] = d.get('status')
@@ -6315,6 +6395,13 @@ def handle_multitenant(chat_id, text):
         _dialog_save(d)
         if compact in MT_CANCEL_WORDS:
             return cancel_mt_batch(chat_id)
+        if (compact in ('重选账号', '换账号') and d.get('account_env')
+                and d.get('status') != 'awaiting_account' and len(_selectable_accounts(d)) > 1):
+            # 选完号之后也能改：清掉选择，重新问一次。
+            d.pop('account_env', None)
+            d.pop('account_label', None)
+            _dialog_save(d)
+            return _mt_prepare_draft(d)
         if d.get('status') == 'awaiting_account' and d.get('pending_accounts'):
             accs = d['pending_accounts']
             if compact in ('\u91cd\u9009\u8d26\u53f7', '\u6362\u8d26\u53f7'):
@@ -6445,9 +6532,9 @@ def handle_multitenant(chat_id, text):
 # 2026-10-23: bypass the legacy publish gate chain; call the verified one-shot
 # script on the customer machine (upload -> title -> tags -> AI declaration ->
 # star task -> recommended-frame cover -> publish).
-ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT") or os.path.join(USER_HOME, "publish_once.py")
-ONCE_PY = os.environ.get("ONCE_PY") or os.path.join(WORKER_ROOT, ".venv", "Scripts", "python.exe")
-PUB_INBOX = os.environ.get("PUB_INBOX") or os.path.join(WORKER_ROOT, "inbox")
+ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT") or CLIENT_HOME + r"\publish_once.py"
+ONCE_PY = os.environ.get("ONCE_PY") or WORKER_ROOT + r"\.venv\Scripts\python.exe"
+PUB_INBOX = os.environ.get("PUB_INBOX") or WORKER_ROOT + r"\inbox"
 ONCE_LEDGER = os.environ.get("ONCE_LEDGER", "/tmp/publish_once_done.json")
 ONCE_TAGS = os.environ.get("ONCE_TAGS", "#\u706b\u9f99\u6f2b\u5267|#\u6f2b\u5267|#\u817e\u8baf\u6f2b\u5267")
 ONCE_TASK = os.environ.get("ONCE_TASK", "\u514d\u8d39-\u65b0\u7801")
@@ -6461,8 +6548,8 @@ ONCE_MODE = {}
 ONCE_DELETE = {}
 ONCE_EDIT = {}
 PUB_RUNNING = set()
-EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT") or os.path.join(USER_HOME, "edit_work.py")
-DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT") or os.path.join(USER_HOME, "delete_work.py")
+EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT") or CLIENT_HOME + r"\edit_work.py"
+DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT") or CLIENT_HOME + r"\delete_work.py"
 ONCE_AWAIT_MODE = {}
 ONCE_STATE_FILE = os.environ.get("ONCE_STATE_FILE", "/tmp/publish_bot_state.json")
 
@@ -6732,7 +6819,7 @@ def verify_published(title, since_ts, timeout=420):
     """Re-read both douyin works lists and confirm the work really exists."""
     try:
         run_cli(["collect-all", "--skip-xingtu"], timeout=timeout)
-        base = os.path.join(WORKER_ROOT, "out", "douyin")
+        base = WORKER_ROOT + r"\out\douyin"
         code = ("import glob,json,os,io;"
                 "fs=glob.glob(os.path.join(r'%s','*.json'));"
                 "fs.sort(key=os.path.getmtime,reverse=True);"

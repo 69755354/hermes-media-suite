@@ -12,8 +12,10 @@ CUST = os.environ.get("PUBLISH_CUSTOMER_ID", "")
 TOK = [l.split("=", 1)[1].strip() for l in open(os.path.join(ROOT, ".env"))
        if l.startswith("CONTROL_ADMIN_TOKEN=")][0]
 CHUNK = 3_000_000
-DATA = (os.environ.get("WORKER_BASE")
-        or os.path.expandvars(r"%LOCALAPPDATA%\HuolongAgent\publish-worker"))
+# 客户机（Windows）用户目录，部署时用环境变量 CLIENT_HOME 配置（同 bot.py）；代码里不写具体用户名。
+CLIENT_HOME = (os.environ.get("CLIENT_HOME") or r"C:\Users\CLIENT_HOME_NOT_SET").rstrip("\\/")
+DATA = (os.environ.get("CLIENT_WORKER_BASE")
+        or CLIENT_HOME + r"\AppData\Local\HuolongAgent\publish-worker")
 TMPDIR = DATA + r"\tmp\upload"
 INBOX = os.path.join(DATA, "customers", CUST, "inbox")
 PY = DATA + r"\.venv\Scripts\python.exe"

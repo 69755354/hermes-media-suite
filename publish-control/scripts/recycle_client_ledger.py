@@ -1,160 +1,185 @@
 #!/usr/bin/env python3
 """列出/回收客户机 run/stage2-ledger.json 里的僵尸占位。
 
-只回收 RESERVED + reservation_schema=2（从未 mark_submit_intent，必然没点发布）。
+只回收 RESERVED + reservation_schema=2（从未 mark_submit_intent，必然没点发布），
+并且同时满足：
+  1. 控制面上该客户没有在途命令（queued / running / needs_reconcile），也没有
+     正在跑的远程 exec——发布进行到一半时账本里本来就是 RESERVED，这时回收会让
+     同一素材再发一遍；
+  2. 占位已保留超过 --min-age-min 分钟（默认 30），给进行中的发布留足时间；
+  3. 到客户机上动手前，在客户机侧再核一遍状态与时长（两次检查之间可能有变化）。
 SUBMIT_INTENT / UNKNOWN 一律只报告，必须先去平台核对结果，禁止自动回收。
 
 用法：
   python3 scripts/recycle_client_ledger.py --customer c_xxxxxxxx            # 只体检
-  python3 scripts/recycle_client_ledger.py --customer c_xxxxxxxx --apply    # 回收 RESERVED
+  python3 scripts/recycle_client_ledger.py --customer c_xxxxxxxx --apply    # 回收
+
+客户机数据目录默认 %LOCALAPPDATA%\\HuolongAgent\\publish-worker（在客户机上展开），
+可用 --data 或环境变量 CLIENT_WORKER_BASE 覆盖。代码里不写任何具体用户名。
 """
-import argparse, base64, datetime, json, os, sqlite3, sys, tempfile, time
+import argparse
+import base64
+import json
+import os
+import sqlite3
+import sys
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import remote_pc as rp  # noqa: E402
 
-# 客户机数据根：不写死用户名。WORKER_BASE 优先，其次当前机器的 %LOCALAPPDATA%。
-DEFAULT_DATA = (os.environ.get("WORKER_BASE")
-                or os.path.expandvars(r"%LOCALAPPDATA%\HuolongAgent\publish-worker"))
+DEFAULT_DATA = (os.environ.get("CLIENT_WORKER_BASE")
+                or r"%LOCALAPPDATA%\HuolongAgent\publish-worker")
+DEFAULT_MIN_AGE_MIN = 30
+INFLIGHT_COMMAND_STATES = ("queued", "running", "claimed", "needs_reconcile")
+INFLIGHT_OP_STATES = ("queued", "running", "claimed", "needs_reconcile")
+KEYS_FILENAME = "recycle_keys.json"
+
+# 在客户机上运行。数据目录、客户、账本全部从脚本自己的位置推出来
+# （<data>\customers\<cid>\run\recycle_ledger.py），不依赖命令行里的路径——
+# 远程 exec 的参数列表不会展开 %LOCALAPPDATA%。
 REMOTE_SCRIPT = r"""
 import json, os, sys
-data = sys.argv[1]
+from datetime import datetime, timezone
+here = os.path.dirname(os.path.abspath(__file__))
 root = os.getcwd()
 if not os.path.isdir(os.path.join(root, "agent", "winport")):
     print(json.dumps({"ok": False, "error": "cwd is not install root: " + root}))
     raise SystemExit(3)
 sys.path.insert(0, root)
-from agent.winport.stage2_ledger import Stage2Ledger
-keys = json.loads(sys.argv[2])
-min_age = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
-led = Stage2Ledger(os.path.join(data, "customers", sys.argv[3], "run", "stage2-ledger.json"))
+from agent.winport.stage2_ledger import Stage2Ledger, RESERVED
+spec = json.load(open(os.path.join(here, "recycle_keys.json"), encoding="utf-8"))
+min_age = float(spec.get("min_age_min", 30))
+led = Stage2Ledger(os.path.join(here, "stage2-ledger.json"))
+now = datetime.now(timezone.utc)
 res = []
-for k in keys:
-    before = led.state(k)
-    ok = led.recycle_zombie(k, reason="manual recycle: pre-submit failure left RESERVED",
-                            min_age_seconds=min_age)
-    res.append({"key": k, "before": before, "recycled": ok})
+for k in spec.get("keys") or []:
+    entry = (led.data.get("entries") or {}).get(k) or {}
+    before = entry.get("state")
+    try:
+        age = (now - datetime.strptime(entry.get("reserved_at") or "", "%Y-%m-%dT%H:%M:%S%z")).total_seconds() / 60
+    except ValueError:
+        age = None
+    if before != RESERVED or entry.get("reservation_schema") != 2 or age is None or age < min_age:
+        res.append({"key": k, "before": before, "age_min": age, "recycled": False,
+                    "skipped": "state/age changed since the server-side check"})
+        continue
+    ok = led.recycle_zombie(k, reason="manual recycle: pre-submit failure left RESERVED")
+    res.append({"key": k, "before": before, "age_min": round(age, 1), "recycled": ok})
 print(json.dumps({"results": res}, ensure_ascii=False))
 """
 
 
-def read_remote(customer, path, timeout=60, device=""):
-    op = rp.enqueue(customer, "read", {"path": path}, device=device)
-    status, result = rp.wait(op, timeout)
-    if status != "done" or not result.get("ok"):
-        raise SystemExit("read failed: %s %s" % (status, result))
-    return json.loads(base64.b64decode(result["base64"]).decode("utf-8"))
-
-
-def run_remote(customer, cmd, timeout=90, device=""):
-    op = rp.enqueue(customer, "exec", {"cmd": cmd, "timeout": timeout}, device=device)
-    return rp.wait(op, timeout + 30)
-
-
-def inflight(customer, db_path=None):
-    """控制面里还有没有在途命令。有就别回收——占位可能正被 fill 用着。"""
-    db = db_path or os.environ.get("CONTROL_DB") or os.path.join(ROOT, "control.db")
-    if not os.path.isfile(db):
-        raise SystemExit("找不到控制面数据库 %s，无法确认有无在途命令，已拒绝 --apply" % db)
-    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
-    rows = []
+def _age_minutes(entry, now):
     try:
-        rows += [(r[0], "command", r[1], r[2]) for r in con.execute(
-            "select id, kind, status from commands"
-            " where customer_id=? and status not in ('done','failed','cancelled')",
-            (customer,))]
-        rows += [(r[0], "remote_op", r[1], r[2]) for r in con.execute(
-            "select id, op, status from remote_ops"
-            " where customer_id=? and status not in ('done','failed')",
-            (customer,))]
-    except sqlite3.Error as exc:
-        raise SystemExit("读控制面数据库失败（%s），已拒绝 --apply" % exc)
+        reserved = datetime.strptime(str(entry.get("reserved_at") or ""), "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        return None
+    return (now - reserved).total_seconds() / 60
+
+
+def classify(entries, account, *, now=None, min_age_min=DEFAULT_MIN_AGE_MIN):
+    """-> (recyclable, manual, too_young): lists of (key, entry, age_min)."""
+    now = now or datetime.now(timezone.utc)
+    recyclable, manual, too_young = [], [], []
+    for k, v in entries.items():
+        if v.get("account_id") != account or v.get("publish_confirmed") is True:
+            continue
+        state = v.get("state")
+        if state not in ("RESERVED", "SUBMIT_INTENT", "UNKNOWN"):
+            continue
+        age = _age_minutes(v, now)
+        if state != "RESERVED" or v.get("reservation_schema") != 2:
+            manual.append((k, v, age))
+        elif age is None or age < min_age_min:
+            too_young.append((k, v, age))
+        else:
+            recyclable.append((k, v, age))
+    return recyclable, manual, too_young
+
+
+def inflight(db_path, customer):
+    """Commands / remote exec ops for this customer that are not finished."""
+    con = sqlite3.connect(db_path)
+    try:
+        cmds = con.execute(
+            "SELECT id, kind, status FROM commands WHERE customer_id=? AND status IN (%s)"
+            % ",".join("?" * len(INFLIGHT_COMMAND_STATES)),
+            (customer, *INFLIGHT_COMMAND_STATES)).fetchall()
+        ops = con.execute(
+            "SELECT id, op, status FROM remote_ops WHERE customer_id=? AND op='exec' AND status IN (%s)"
+            % ",".join("?" * len(INFLIGHT_OP_STATES)),
+            (customer, *INFLIGHT_OP_STATES)).fetchall()
     finally:
         con.close()
-    return rows
+    return [("command", *r) for r in cmds] + [("remote_exec", *r) for r in ops]
 
 
-def _age_seconds(value):
-    """reserved_at 是 %Y-%m-%dT%H:%M:%S%z 格式；解析不了就当作很老。"""
-    try:
-        ts = datetime.datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%S%z")
-    except (TypeError, ValueError):
-        return None
-    return (datetime.datetime.now(ts.tzinfo) - ts).total_seconds()
+def _win_join(*parts):
+    return "\\".join(p.strip("\\") for p in parts if p)
 
 
-def blockers(entries, account):
-    out = []
-    for k, v in entries.items():
-        if v.get("account_id") != account:
-            continue
-        if v.get("publish_confirmed") is True:
-            continue
-        if v.get("state") in ("SUBMIT_INTENT", "UNKNOWN") or v.get("state") == "RESERVED":
-            out.append((k, v))
-    return out
+def main(argv=None):
+    import remote_pc as rp  # noqa: E402  (needs the control-plane checkout)
 
-
-def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--customer", required=True)
     ap.add_argument("--data", default=DEFAULT_DATA)
     ap.add_argument("--account", default="env_1:douyin")
+    ap.add_argument("--device", default="")
+    ap.add_argument("--min-age-min", type=float, default=DEFAULT_MIN_AGE_MIN)
     ap.add_argument("--apply", action="store_true")
-    ap.add_argument("--device", default="", help="多设备客户的目标机器")
-    ap.add_argument("--min-age-min", type=int, default=30,
-                    help="只回收保留超过 N 分钟的占位（默认 30）")
-    ap.add_argument("--force", action="store_true",
-                    help="控制面存在在途命令时仍强制回收（仅确认过无在途才可用）")
-    ns = ap.parse_args()
+    ns = ap.parse_args(argv)
     cid = ns.customer
-    ledger_path = ns.data + r"\customers\%s\run\stage2-ledger.json" % cid
-    data = read_remote(cid, ledger_path, device=ns.device)
-    entries = data.get("entries") or {}
-    rows = blockers(entries, ns.account)
-    print("ledger entries=%d blocking=%d" % (len(entries), len(rows)))
-    recyclable = []
-    for k, v in rows:
-        struct_ok = v.get("state") == "RESERVED" and v.get("reservation_schema") == 2
-        age = _age_seconds(v.get("reserved_at"))
-        young = age is not None and age < ns.min_age_min * 60
-        ok = struct_ok and not young
-        tag = "可回收" if ok else ("太新，先不动" if struct_ok and young else "需人工核对")
-        print("  [%s] %s %s %s" % (tag, v.get("state"),
-                                   v.get("reserved_at"), v.get("content_hash", "")[:12]))
-        print("      %s" % k)
-        if ok:
-            recyclable.append(k)
-    if not ns.apply or not recyclable:
-        return
-    live = inflight(cid)
-    if live and not ns.force:
-        print("拒绝回收：控制面还有 %d 条在途命令" % len(live))
-        for row in live[:10]:
-            print("  %s %s %s" % (row[1], row[2], row[0]))
-        print("确认这些不是发布中的批次后，可加 --force 重跑。")
-        raise SystemExit(2)
-    script = os.path.join(tempfile.gettempdir(), "recycle_ledger_%d.py" % int(time.time()))
-    with open(script, "w", encoding="utf-8") as fh:
-        fh.write(REMOTE_SCRIPT)
-    remote_script = ns.data + r"\customers\%s\run\recycle_ledger.py" % cid
-    payload = base64.b64encode(open(script, "rb").read()).decode()
-    op = rp.enqueue(cid, "write", {"path": remote_script, "base64": payload}, device=ns.device)
-    st, res = rp.wait(op, 90)
+
+    def call(op, args, timeout=90):
+        op_id = rp.enqueue(cid, op, args, device=ns.device)
+        return rp.wait(op_id, timeout)
+
+    run_dir = _win_join(ns.data, "customers", cid, "run")
+    st, res = call("read", {"path": _win_join(run_dir, "stage2-ledger.json")}, 60)
     if st != "done" or not res.get("ok"):
-        raise SystemExit("upload failed: %s %s" % (st, res))
-    python = ns.data + r"\.venv\Scripts\python.exe"
-    cmd = [python, remote_script, ns.data, json.dumps(recyclable), cid,
-           str(ns.min_age_min * 60)]
-    st, res = run_remote(cid, cmd, 90, device=ns.device)
+        raise SystemExit("read failed: %s %s" % (st, res))
+    entries = (json.loads(base64.b64decode(res["base64"]).decode("utf-8")).get("entries") or {})
+    recyclable, manual, too_young = classify(entries, ns.account, min_age_min=ns.min_age_min)
+    print("ledger entries=%d recyclable=%d manual=%d too_young=%d"
+          % (len(entries), len(recyclable), len(manual), len(too_young)))
+    for tag, rows in (("可回收", recyclable), ("需人工核对", manual),
+                      ("太新，暂不回收", too_young)):
+        for k, v, age in rows:
+            print("  [%s] %s reserved_at=%s age_min=%s %s" % (
+                tag, v.get("state"), v.get("reserved_at"),
+                "?" if age is None else round(age, 1), (v.get("content_hash") or "")[:12]))
+            print("      %s" % k)
+    if not ns.apply or not recyclable:
+        return 0
+
+    busy = inflight(rp.DB, cid)
+    if busy:
+        print("拒绝回收：该客户还有在途任务，发布进行中时账本本来就是 RESERVED：")
+        for row in busy:
+            print("  %s %s %s %s" % row)
+        return 4
+
+    spec = {"keys": [k for k, _, _ in recyclable], "min_age_min": ns.min_age_min}
+    for name, payload in (("recycle_ledger.py", REMOTE_SCRIPT.encode("utf-8")),
+                          (KEYS_FILENAME, json.dumps(spec).encode("utf-8"))):
+        st, res = call("write", {"path": _win_join(run_dir, name),
+                                 "base64": base64.b64encode(payload).decode()}, 90)
+        if st != "done" or not res.get("ok"):
+            raise SystemExit("upload failed: %s %s %s" % (name, st, res))
+    # 字符串命令走 cmd.exe，%LOCALAPPDATA% 会在客户机上展开。
+    python = _win_join(ns.data, ".venv", "Scripts", "python.exe")
+    cmd = '"%s" "%s"' % (python, _win_join(run_dir, "recycle_ledger.py"))
+    st, res = call("exec", {"cmd": cmd, "timeout": 90}, 120)
     print("recycle:", st, res.get("stdout") or res.get("stderr"))
-    after = read_remote(cid, ledger_path, device=ns.device)
-    left = blockers(after.get("entries") or {}, ns.account)
-    print("after: blocking=%d" % len(left))
-    for k, v in left:
-        print("  [%s] %s" % (v.get("state"), k))
+    st, res = call("read", {"path": _win_join(run_dir, "stage2-ledger.json")}, 60)
+    if st == "done" and res.get("ok"):
+        after = json.loads(base64.b64decode(res["base64"]).decode("utf-8")).get("entries") or {}
+        left = classify(after, ns.account, min_age_min=ns.min_age_min)
+        print("after: recyclable=%d manual=%d too_young=%d" % tuple(len(x) for x in left))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

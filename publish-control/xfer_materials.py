@@ -11,10 +11,10 @@ CUST = os.environ.get("PUBLISH_CUSTOMER_ID", "")
 TOK = [l.split("=", 1)[1].strip() for l in open(os.path.join(ROOT, ".env"))
        if l.startswith("CONTROL_ADMIN_TOKEN=")][0]
 CHUNK = 3_000_000
-WORKER_BASE = (os.environ.get("WORKER_BASE")
-               or os.path.expandvars(r"%LOCALAPPDATA%\HuolongAgent\publish-worker"))
-TMPDIR = os.path.join(WORKER_BASE, "tmp", "upload")
-USER_HOME = os.environ.get("USER_HOME") or os.path.expanduser("~")
+# 客户机（Windows）用户目录，部署时用环境变量 CLIENT_HOME 配置（同 bot.py）；代码里不写具体用户名。
+CLIENT_HOME = (os.environ.get("CLIENT_HOME") or r"C:\Users\CLIENT_HOME_NOT_SET").rstrip("\\/")
+TMPDIR = (os.environ.get("CLIENT_UPLOAD_TMPDIR")
+          or CLIENT_HOME + r"\AppData\Local\HuolongAgent\publish-worker\tmp\upload")
 
 
 def fire(op, args, wait=180):
@@ -46,13 +46,13 @@ def push(src, dst, name):
     ps = ("$o=[IO.File]::Create('%s'); " % dst +
           "".join("$b=[IO.File]::ReadAllBytes('%s'); $o.Write($b,0,$b.Length); " % p for p in part_paths) +
           "$o.Close(); (Get-FileHash -Algorithm SHA256 -LiteralPath '%s').Hash" % dst)
-    st, res = fire("exec", {"cmd": ["powershell", "-NoProfile", "-Command", ps], "cwd": USER_HOME, "timeout": 300})
+    st, res = fire("exec", {"cmd": ["powershell", "-NoProfile", "-Command", ps], "cwd": CLIENT_HOME, "timeout": 300})
     got = (res.get("stdout") or "").strip().upper()
     ok = got == sha.upper()
     print(("OK  " if ok else "BAD ") + name, "bytes=%d" % len(data), "remote_sha=" + (got or "none")[:16], "expect=" + sha[:16])
     if ok:
         rm = "".join("Remove-Item -LiteralPath '%s' -Force; " % p for p in part_paths)
-        fire("exec", {"cmd": ["powershell", "-NoProfile", "-Command", rm], "cwd": USER_HOME, "timeout": 120})
+        fire("exec", {"cmd": ["powershell", "-NoProfile", "-Command", rm], "cwd": CLIENT_HOME, "timeout": 120})
     return ok
 
 
