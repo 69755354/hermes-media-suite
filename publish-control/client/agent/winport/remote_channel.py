@@ -29,6 +29,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .paths import install_root
+from .process_identity import marker_identity
 from .process_tree import ProcessTree
 from .settings import load_settings
 from .subprocess_text import hidden_window_options
@@ -595,8 +596,11 @@ class ControlService:
         try:
             fd = os.open(self.secret, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                identity = marker_identity()
                 json.dump({'token': self.token, 'port': self.server.server_port,
-                           'pid': os.getpid()}, stream)
+                           'pid': identity['pid'],
+                           'agent_pid': identity['agent_pid'],
+                           'pid_chain': identity['pid_chain']}, stream)
             threading.Thread(target=self.server.serve_forever, daemon=True,
                              name='remote-http').start()
         except Exception:

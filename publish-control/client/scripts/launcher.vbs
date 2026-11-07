@@ -227,9 +227,15 @@ Function ReadyPid(path)
   token = MarkerField(txt, "instance")
   If token = "" Then Exit Function
   If Not IsHexToken(token) Then Exit Function
-  p = InStr(txt, """pid"":")
+  ' Prefer the process that actually owns the panel: an updater-supervised
+  ' launch writes the venv redirector pid in "pid" and the runtime child in
+  ' "agent_pid".  Older markers have only "pid".
+  p = InStr(txt, """agent_pid"":")
+  If p = 0 Then p = InStr(txt, """pid"":")
   If p = 0 Then Exit Function
-  p = p + 6
+  p = InStr(p, txt, ":")
+  If p = 0 Then Exit Function
+  p = p + 1
   ' skip whitespace: jsonio.write_json writes indented JSON ("pid": 123)
   Do While p <= Len(txt)
     ch = Mid(txt, p, 1)

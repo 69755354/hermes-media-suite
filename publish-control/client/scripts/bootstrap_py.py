@@ -1422,7 +1422,7 @@ class Installer:
         try:
             marker = json.loads((self.data / "run" / "agent-ready.json").read_text(
                 encoding="utf-8-sig"))
-            marker_pid = int(marker.get("pid") or 0)
+            marker_pid = int(marker.get("agent_pid") or marker.get("pid") or 0)
             ready = marker.get("ready") is True
         except (OSError, ValueError, TypeError, AttributeError):
             return False, "readiness marker unreadable"

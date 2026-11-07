@@ -93,7 +93,9 @@ def health_matches_marker(state, marker):
     if not isinstance(state, dict) or not isinstance(marker, dict):
         return False
     token = marker.get("instance")
-    pid = marker.get("pid")
+    # The updater-supervised launch keeps the supervisor-visible pid in
+    # "pid" and the process that really owns 9223 in "agent_pid".
+    pid = marker.get("agent_pid") or marker.get("pid")
     if not token or marker.get("ready") is not True or not isinstance(pid, int):
         return False
     if state.get("instance") != token or pid_on_9223() != pid:

@@ -74,7 +74,10 @@ function Stop-StaleAgent {
     if (Test-Path -LiteralPath $readyFile) {
       try {
         $doc = Get-Content -LiteralPath $readyFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($doc.pid) { Stop-Process -Id ([int]$doc.pid) -Force -ErrorAction SilentlyContinue }
+        $livePid = 0
+        try { $livePid = [int]$doc.agent_pid } catch { }
+        if ($livePid -le 0) { try { $livePid = [int]$doc.pid } catch { } }
+        if ($livePid -gt 0) { Stop-Process -Id $livePid -Force -ErrorAction SilentlyContinue }
         if ("$($doc.panel_url)" -match ':(\d{1,5})/') {
           $port = [int]$Matches[1]
           Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
@@ -146,7 +149,8 @@ function Get-ReadyPanel {
   if ($token -notmatch '^[0-9a-fA-F]{32}$') { return $null }
 
   $agentPid = 0
-  try { $agentPid = [int]$doc.pid } catch { return $null }
+  try { $agentPid = [int]$doc.agent_pid } catch { }
+  if ($agentPid -le 0) { try { $agentPid = [int]$doc.pid } catch { return $null } }
   if ($agentPid -le 0) { return $null }
   if (-not (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { return $null }
   if (-not (Test-PanelHealth $url $token)) { return $null }

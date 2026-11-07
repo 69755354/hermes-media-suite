@@ -528,7 +528,11 @@ Function LiveAgentPid(readyPath)
   txt = ts.ReadAll
   ts.Close
   If InStr(txt, Chr(34) & "ready" & Chr(34) & ": true") = 0 Then Exit Function
-  p = InStr(txt, Chr(34) & "pid" & Chr(34))
+  ' An updater-supervised launch writes the venv redirector pid in "pid" and
+  ' the live panel process in "agent_pid".  Supervise the latter so socket
+  ' ownership and the clean-exit pid stay meaningful.
+  p = InStr(txt, Chr(34) & "agent_pid" & Chr(34))
+  If p = 0 Then p = InStr(txt, Chr(34) & "pid" & Chr(34))
   If p = 0 Then Exit Function
   q = InStr(p, txt, ":")
   If q = 0 Then Exit Function

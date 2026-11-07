@@ -22,6 +22,7 @@ from .errors import EXIT_CONFIG, EXIT_OK, EXIT_SKIP, WinPortError
 from .instance import InstanceGuard
 from .logutil import get_logger
 from .paths import Layout, install_root
+from .process_identity import marker_identity
 from .settings import load_settings
 from .version import APP_NAME_DISPLAY, VERSION
 
@@ -120,6 +121,7 @@ def _clear_ready_marker(layout, logger) -> None:
         try:
             from .jsonio import write_json
             write_json(path, {"pid": None, "ready": False, "panel_url": None,
+                              "agent_pid": None, "pid_chain": [],
                               "panel_error": "agent stopped", "instance": None,
                               "ts": time.time(), "version": VERSION})
         except OSError:
@@ -350,6 +352,11 @@ def _run_agent(layout, logger, args) -> int:
         instance_token = injected_token
     else:
         instance_token = os.urandom(16).hex()
+    # A Windows venv pythonw is a redirector: the updater-spawned process and
+    # the process serving /healthz have different pids.  Keep the legacy
+    # supervisor-visible pid in "pid" and publish the live server pid as
+    # "agent_pid" (see process_identity.py).
+    identity = marker_identity()
     try:
         from .jsonio import read_json
         from .panel import serve_in_thread
@@ -385,7 +392,9 @@ def _run_agent(layout, logger, args) -> int:
     try:
         from .jsonio import write_json
         write_json(Path(layout.run) / "agent-ready.json",
-                   {"pid": os.getpid() if panel_ok else None,
+                   {"pid": identity["pid"] if panel_ok else None,
+                    "agent_pid": identity["agent_pid"] if panel_ok else None,
+                    "pid_chain": list(identity["pid_chain"]) if panel_ok else [],
                     "ready": panel_ok, "panel_url": panel_url,
                     "panel_error": panel_error,
                     "instance": instance_token if panel_ok else None,

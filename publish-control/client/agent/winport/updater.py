@@ -58,6 +58,7 @@ from .jsonio import read_json, write_json, write_text_atomic
 from .license import require_vendor_public_key
 from .lock import FileLock, lock_is_held
 from .paths import Layout, install_root
+from .process_identity import is_descendant
 from .settings import load_settings
 from .subprocess_text import hidden_window_options
 
@@ -911,6 +912,62 @@ def _read_marker(job: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _pid_evidence(record: dict) -> tuple[int, int]:
+    """Return (supervisor-visible pid, panel-serving pid) or (0, 0).
+
+    New records carry both pids plus ``pid_chain``.  The chain must start at
+    the supervisor-visible pid and end at the process that owns the panel;
+    malformed or contradictory evidence is rejected instead of being partially
+    trusted.
+    """
+    try:
+        owner_pid = int(record.get("pid") or 0)
+        agent_pid = int(record.get("agent_pid") or owner_pid)
+    except (TypeError, ValueError):
+        return 0, 0
+    if owner_pid <= 0 or agent_pid <= 0:
+        return 0, 0
+    chain = record.get("pid_chain")
+    if chain is not None:
+        if not isinstance(chain, (list, tuple)) or not chain:
+            return 0, 0
+        try:
+            chain = [int(item) for item in chain]
+        except (TypeError, ValueError):
+            return 0, 0
+        if any(item <= 0 for item in chain):
+            return 0, 0
+        if chain[0] != owner_pid or chain[-1] != agent_pid:
+            return 0, 0
+        if len(set(chain)) != len(chain):
+            return 0, 0
+    return owner_pid, agent_pid
+
+
+def _pid_belongs(pid: int, owner_pid: int, agent_pid: int,
+                 *, legacy: bool) -> bool:
+    """Match a supervisor pid against the record's ownership evidence.
+
+    The supervisor compares the pid it spawned with the record.  For new
+    records the recorded owner (legacy ``pid``) and live panel process
+    (``agent_pid``) must also form a real parent/child chain.  An old 1.2.191
+    marker has only ``pid`` and records the runtime child, which is a
+    descendant of the venv redirector the supervisor spawned; accept that exact
+    parent/child relationship for rollback, never an unrelated process.
+    """
+    pid = int(pid)
+    owner_pid = int(owner_pid)
+    agent_pid = int(agent_pid)
+    if pid not in (owner_pid, agent_pid):
+        return bool(legacy and is_descendant(agent_pid, pid))
+    if agent_pid == owner_pid:
+        return True
+    # New semantics: the panel process must really be the recorded launcher's
+    # descendant.  This rejects a marker that merely repeats the supervisor pid
+    # while claiming an unrelated live process as the panel owner.
+    return is_descendant(agent_pid, owner_pid)
+
+
 def _remote_enabled(job: dict) -> bool:
     try:
         settings = load_settings(Path(job["data"]) / "config" / "settings.json")
@@ -944,7 +1001,11 @@ def _tunnel_snapshot_ok(job: dict, pid: int) -> tuple[bool, str]:
         return False, f"remote state unreadable: {_safe_reason(exc)}"
     if not token or not relay.isdigit():
         return False, "remote token/relay port missing"
-    if int(session.get("pid") or 0) != int(pid):
+    session_pid, session_agent = _pid_evidence(session)
+    if not session_pid:
+        return False, "remote control service pid evidence is invalid"
+    if not _pid_belongs(pid, session_pid, session_agent,
+                        legacy=not session.get("agent_pid")):
         return False, "remote control service is not owned by the new instance"
     try:
         log_path = data / "logs" / "remote-channel.log"
@@ -983,7 +1044,11 @@ def probe_health(job: dict, pid: int, version: str) -> tuple[bool, str]:
         return False, "readiness marker is not ready"
     if marker.get("version") != version:
         return False, "readiness marker version mismatch"
-    if int(marker.get("pid") or 0) != int(pid):
+    marker_pid, agent_pid = _pid_evidence(marker)
+    if not marker_pid:
+        return False, "readiness marker has invalid pid evidence"
+    if not _pid_belongs(pid, marker_pid, agent_pid,
+                        legacy=not marker.get("agent_pid")):
         return False, "readiness marker belongs to another process"
     instance = marker.get("instance")
     if not instance or health.get("instance") != instance:
