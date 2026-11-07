@@ -37,9 +37,10 @@ if os.path.exists(_ENV_FILE):
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 CLI_PY = os.environ.get("CLI_PY", r"C:\\Users\\<USER>\\Desktop\\manju-publish-assistant-1\\manju-publish-assistant-1.2.34-win64\\runtime\\python.exe")
-LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or r"C:\Users\huang\AppData\Local"
-WORKER_ROOT = (os.environ.get("WORKER_DATA_ROOT")
-               or r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker")
+USER_HOME = os.environ.get("USER_HOME") or os.path.expanduser("~")
+LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or os.path.join(USER_HOME, "AppData", "Local")
+WORKER_ROOT = (os.environ.get("WORKER_DATA_ROOT") or os.environ.get("WORKER_BASE")
+               or os.path.join(LOCALAPPDATA, "HuolongAgent", "publish-worker"))
 PY_EXE = (os.environ.get("PY_EXE")
           or LOCALAPPDATA
           + r"\HuolongAgent\publish-worker\.venv\Scripts\python.exe")
@@ -1442,7 +1443,7 @@ def _client_exec_code(code, timeout=60, cwd=None, env=None):
 
 INBOX_SCAN = r"""
 import os,glob,json
-base=os.environ.get("BT_WORKER_BASE") or (os.environ.get("LOCALAPPDATA",r"C:\Users\huang\AppData\Local")+r"\HuolongAgent\publish-worker")
+base=os.environ.get("BT_WORKER_BASE") or os.environ.get("WORKER_BASE") or os.path.join(os.environ["LOCALAPPDATA"],"HuolongAgent","publish-worker")
 roots=[]
 def _add(p):
     if p and p not in roots: roots.append(p)
@@ -2415,7 +2416,7 @@ def ensure_browser(env="env_2", port=9225):
     ps = r"""
 $u='http://127.0.0.1:__PORT__/json/version'
 try { Invoke-WebRequest -UseBasicParsing $u -TimeoutSec 2 | Out-Null; Write-Output 'ALREADY'; exit 0 } catch {}
-$prof='C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\profiles\__ENV__'
+$prof=Join-Path $env:LOCALAPPDATA 'HuolongAgent\publish-worker\profiles\__ENV__'
 $chrome=Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'
 $c='"' + $chrome + '" --remote-debugging-port=__PORT__ --user-data-dir="' + $prof + '" --no-first-run --no-default-browser-check about:blank'
 Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c} | Out-Null
@@ -2534,8 +2535,7 @@ def show_tasks(chat_id):
 
 PLAN_MAKER = r"""
 import os,glob,hashlib,json,datetime,random
-base=os.environ.get("LOCALAPPDATA",r"C:\Users\huang\AppData\Local")+r"\HuolongAgent\publish-worker"
-base=os.environ.get("BT_WORKER_BASE") or base
+base=os.environ.get("BT_WORKER_BASE") or os.environ.get("WORKER_BASE") or os.path.join(os.environ["LOCALAPPDATA"],"HuolongAgent","publish-worker")
 inbox=os.path.join(base,"inbox")
 raw_files=json.loads(os.environ.get("BT_FILES") or "[]")
 if raw_files:
@@ -6445,9 +6445,9 @@ def handle_multitenant(chat_id, text):
 # 2026-10-23: bypass the legacy publish gate chain; call the verified one-shot
 # script on the customer machine (upload -> title -> tags -> AI declaration ->
 # star task -> recommended-frame cover -> publish).
-ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT", r"C:\Users\huang\publish_once.py")
-ONCE_PY = os.environ.get("ONCE_PY", r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\.venv\Scripts\python.exe")
-PUB_INBOX = os.environ.get("PUB_INBOX", r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\inbox")
+ONCE_SCRIPT = os.environ.get("ONCE_SCRIPT") or os.path.join(USER_HOME, "publish_once.py")
+ONCE_PY = os.environ.get("ONCE_PY") or os.path.join(WORKER_ROOT, ".venv", "Scripts", "python.exe")
+PUB_INBOX = os.environ.get("PUB_INBOX") or os.path.join(WORKER_ROOT, "inbox")
 ONCE_LEDGER = os.environ.get("ONCE_LEDGER", "/tmp/publish_once_done.json")
 ONCE_TAGS = os.environ.get("ONCE_TAGS", "#\u706b\u9f99\u6f2b\u5267|#\u6f2b\u5267|#\u817e\u8baf\u6f2b\u5267")
 ONCE_TASK = os.environ.get("ONCE_TASK", "\u514d\u8d39-\u65b0\u7801")
@@ -6461,8 +6461,8 @@ ONCE_MODE = {}
 ONCE_DELETE = {}
 ONCE_EDIT = {}
 PUB_RUNNING = set()
-EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT", r"C:\Users\huang\edit_work.py")
-DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT", r"C:\Users\huang\delete_work.py")
+EDIT_SCRIPT = os.environ.get("EDIT_SCRIPT") or os.path.join(USER_HOME, "edit_work.py")
+DELETE_SCRIPT = os.environ.get("DELETE_SCRIPT") or os.path.join(USER_HOME, "delete_work.py")
 ONCE_AWAIT_MODE = {}
 ONCE_STATE_FILE = os.environ.get("ONCE_STATE_FILE", "/tmp/publish_bot_state.json")
 
@@ -6732,7 +6732,7 @@ def verify_published(title, since_ts, timeout=420):
     """Re-read both douyin works lists and confirm the work really exists."""
     try:
         run_cli(["collect-all", "--skip-xingtu"], timeout=timeout)
-        base = r"C:\Users\huang\AppData\Local\HuolongAgent\publish-worker\out\douyin"
+        base = os.path.join(WORKER_ROOT, "out", "douyin")
         code = ("import glob,json,os,io;"
                 "fs=glob.glob(os.path.join(r'%s','*.json'));"
                 "fs.sort(key=os.path.getmtime,reverse=True);"

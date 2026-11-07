@@ -298,13 +298,26 @@ class Stage2Ledger:
                          marked_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
             self.save()
 
-    def recycle_zombie(self, key: str, reason="manual recycle") -> bool:
+    def recycle_zombie(self, key: str, reason="manual recycle",
+                       min_age_seconds: float = 0) -> bool:
         """RESERVED -> deleted, but only after backing up the ledger file.
-        CONSUMED / UNKNOWN can never be recycled (Mac parity)."""
+        CONSUMED / UNKNOWN can never be recycled (Mac parity).
+
+        ``min_age_seconds`` protects a reservation that a publish run may still
+        be holding (fill in progress): anything younger than that is refused.
+        """
         with self.locked():
             entry = self.data["entries"].get(key)
             if not entry or entry.get("state") != RESERVED or entry.get("reservation_schema") != 2:
                 return False
+            if min_age_seconds > 0:
+                try:
+                    ts = time.mktime(time.strptime(str(entry.get("reserved_at")),
+                                                   "%Y-%m-%dT%H:%M:%S%z"))
+                except (TypeError, ValueError):
+                    ts = 0.0
+                if ts and (time.time() - ts) < min_age_seconds:
+                    return False
             self.backup(reason)
             del self.data["entries"][key]
             self.save()

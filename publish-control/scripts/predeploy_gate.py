@@ -18,6 +18,7 @@
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -38,8 +39,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--customer")
-    ap.add_argument("--program-path",
-                    default="C:/Users/huang/Desktop/manju-publish-assistant-1/manju-publish-assistant-1.2.168-win64")
+    ap.add_argument("--program-path", default=os.environ.get("PROGRAM_PATH") or "",
+                    help="客户机安装目录；也可用 PROGRAM_PATH 环境变量")
     ns = ap.parse_args(argv)
     root = Path(ns.build_dir).resolve()
     problems = []

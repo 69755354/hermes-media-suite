@@ -71,9 +71,9 @@ SCAN_SKIP_FILES = {
 # Continuous terminal-state observation requires this read-only init script.
 # This exception binds the exact installer AST and script bytes; it is not a
 # file exemption. Extra calls, script mutations, and every other init script fail.
-MONITOR_INSTALLER_SHA256 = "0143c65c208f8059fe912ddca445e3e13bfead3fc512b60b7db437f048c2196a"
+MONITOR_INSTALLER_SHA256 = "176849c1ff54b3d3b58a338748599e9ac3c24ac5e2d9655913c5e79cf16d20f3"
 VISIBLE_TEXT_SHA256 = "39ca5452b2f0cd8f1c08c879eb2d5e21d98a024082803b3ccec1100a6b7c5588"
-MONITOR_SCRIPT_SHA256 = "ce4846660dcf4c1927f698cd6a8147a51946cced0ea3eee1019edfd4e83bc96e"
+MONITOR_SCRIPT_SHA256 = "21eac1f2d57c1b6ebce61e78848bf76a3a7c7b3a68ceeb49f652e98050a0e7c2"
 
 
 def read_only_monitor_allowed(rel, text):

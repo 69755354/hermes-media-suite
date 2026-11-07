@@ -1771,19 +1771,24 @@ class H(BaseHTTPRequestHandler):
         if not os.path.isfile(full):
             return self._send(404, {"ok": False, "error": "not found"})
         try:
-            with open(full, "rb") as fh:
-                body = fh.read()
+            size = os.path.getsize(full)
         except OSError:
             return self._send(500, {"ok": False, "error": "read failed"})
         self.send_response(200)
         self.send_header("Content-Type",
                          "application/json; charset=utf-8" if name.endswith(".json")
                          else "application/zip")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(size))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        # 分块发送：整包 300MB，读进内存后几个并发请求就能把控制面吃满。
         try:
-            self.wfile.write(body)
+            with open(full, "rb") as fh:
+                while True:
+                    chunk = fh.read(256 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass
 

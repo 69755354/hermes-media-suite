@@ -276,7 +276,9 @@ class PublishReceipt:
             except Exception: pass
         self.handlers=[]
         if getattr(self,'observer_name',None):
-            try: self.page.evaluate("name => window[name+'Stop']?.()",self.observer_name)
+            # inject-ok: 触发脚本里的闭包清理，不依赖任何 window 全局属性。
+            try: self.page.evaluate("name => document.dispatchEvent(new Event(name))",
+                                    self.observer_name+'Stop')
             except Exception: pass
         if self.cdp is not None:
             if getattr(self,'observer_script_id',None):
@@ -309,10 +311,12 @@ VISIBLE_TEXT_SCRIPT = r'''root => {
 }'''
 
 # Only reads DOM and reports diagnostics; never writes platform evidence.
+# The only window property here is Playwright's own expose_binding channel.
+# Install idempotency and stop are handled without window-scoped state: the
+# caller installs once per page, and teardown is a DOM event the closure owns.
+# inject-ok: read-only DOM observer, reports diagnostics, never writes evidence.
 MONITOR_SCRIPT = r'''(() => {
  const name=__BINDING__, failures=__FAILURES__;
- if(window[name+'Installed']) return;
- window[name+'Installed']=true;
  const report=s=>{ if(typeof window[name]==='function') window[name](s); };
  const failed=text=>failures.find(s=>(text||'').includes(s));
  const renderedText=(__VISIBLE_TEXT__);
@@ -330,14 +334,19 @@ MONITOR_SCRIPT = r'''(() => {
  });
  observer.observe(document,{subtree:true,childList:true,characterData:true,attributes:true});
  inspect();const timer=setInterval(inspect,100);
- window[name+'Stop']=()=>{observer.disconnect();clearInterval(timer);};
+ document.addEventListener(name+'Stop',()=>{observer.disconnect();clearInterval(timer);},{once:true});
 })();'''
 
 def install_monitor(page,receipt,failure_markers):
+    # 每个 page 只装一次：脚本内不再用 window 标记做幂等，重复调用会挂两个
+    # observer 和两个 100ms 定时器，所以幂等由这里保证。
+    if getattr(receipt,'observer_script_id',None):
+        return
     name='_publishMonitor_'+uuid.uuid4().hex
     page.expose_binding(name,lambda source,reason: receipt.observe_page_failure(reason)
                         if source.get('frame')==page.main_frame else None)
     script=MONITOR_SCRIPT.replace('__BINDING__',json.dumps(name)).replace('__FAILURES__',json.dumps(list(failure_markers))).replace('__VISIBLE_TEXT__',VISIBLE_TEXT_SCRIPT)
     receipt.observer_name=name
     receipt.observer_script_id=receipt.cdp.send('Page.addScriptToEvaluateOnNewDocument',{'source':script})['identifier']
+    # inject-ok: 同一个只读观察脚本补装到当前文档（新文档由 CDP 自动注入）。
     page.evaluate(script)

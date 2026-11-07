@@ -166,8 +166,10 @@ def _loop(config, logger):
         except Exception as exc:  # noqa: BLE001 - keep polling
             if logger is not None:
                 logger.debug("remote agent poll failed: %s", exc)
+            # wait-ok: poll
             time.sleep(5)
             continue
+        # wait-ok: poll
         time.sleep(2)
 
 

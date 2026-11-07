@@ -739,6 +739,7 @@ def _stop_processes_in_dir(root, log) -> int:
             continue
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and _process_alive(pid):
+            # wait-ok: poll
             time.sleep(0.25)
         if _process_alive(pid):
             log("    WARNING: pid %s did not exit" % pid)
@@ -1365,6 +1366,7 @@ class Installer:
                 self.log("  taskkill rc=%s" % res.returncode)
                 deadline = time.monotonic() + 10.0
                 while time.monotonic() < deadline and _process_alive(pid):
+                    # wait-ok: poll
                     time.sleep(0.25)
                 if _process_alive(pid):
                     raise RuntimeError(
@@ -1637,6 +1639,7 @@ class Installer:
             if self.find_chrome():
                 self.log("chrome installed")
                 return
+            # wait-ok: poll
             time.sleep(2)
         self.log("chrome still not detected after install")
 
@@ -1958,6 +1961,7 @@ class Installer:
             if ready:
                 self.log("agent and supervisor verified: %s" % reason)
                 return
+            # wait-ok: poll
             time.sleep(0.5)
         raise RuntimeError("agent handoff failed: %s\n%s" %
                            (reason, supervisor_diagnostics(self.data)))
