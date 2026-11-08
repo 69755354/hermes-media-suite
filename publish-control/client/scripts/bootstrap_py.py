@@ -1042,6 +1042,9 @@ class Installer:
         self.venv_py = self.data / ".venv" / "Scripts" / "python.exe"
         self.log_path = self.data / "logs" / "install.log"
         self.lines: list[str] = []
+        self.problems: list[str] = []
+        self.license_handover_ok: bool | None = None
+        self.license_problem_reported = False
 
     # ---------- logging ----------
     def log(self, msg: str) -> None:
@@ -2136,7 +2139,14 @@ class Installer:
             self.log("activation deferred: %s" % exc)
 
     def step_trial(self) -> None:
-        """Create the 14-day trial ONCE, at install time, never on every run."""
+        """Create the 14-day trial ONCE, then verify it is really usable.
+
+        A trial that was not created (or an existing trial that expired / was
+        tombstoned) must not be reported as a successful install: the customer
+        would open the panel and find publishing blocked with no explanation.
+        The explicit recovery text is written through ``self.log`` so it lands
+        in both the console and ``install-log.txt``.
+        """
         try:
             from winport.license import initialize_trial
             from winport.paths import Layout
@@ -2144,8 +2154,54 @@ class Installer:
                 Layout(program=self.program, data=self.data).ensure(),
                 allow_create=not self.data_existed)
             self.log("trial: %s" % (result.get("reason") or result))
-        except Exception as exc:  # trial is optional; never block installation
-            self.log("trial initialization skipped: %s" % exc)
+        except Exception as exc:
+            result = {"created": False,
+                      "reason": "trial initialization raised %s: %s"
+                                % (type(exc).__name__, exc)}
+            self.log("trial: %s" % result["reason"])
+        self.step_license_handover(log_success=False)
+
+    def step_license_handover(self, *, log_success: bool = True) -> bool:
+        """Require a valid formal licence OR a genuinely valid trial."""
+        from winport.licstate import unified_license_state
+        from winport.paths import Layout
+
+        try:
+            state = unified_license_state(
+                Layout(program=self.program, data=self.data).ensure())
+        except Exception as exc:
+            state = {"status": "ERROR", "publish_allowed": False,
+                     "reasons": ["授权状态无法计算：%s: %s"
+                                 % (type(exc).__name__, exc)]}
+        status = state.get("status")
+        if status in ("OK", "GRACE"):
+            self.license_handover_ok = True
+            if log_success:
+                self.log("licence handover ok: formal licence %s" % status)
+            return True
+        if status == "TRIAL" and state.get("publish_allowed"):
+            self.license_handover_ok = True
+            if log_success:
+                self.log("licence handover ok: trial active, days_left=%s"
+                         % state.get("days_left"))
+            return True
+
+        self.license_handover_ok = False
+        if not self.license_problem_reported:
+            detail = ("；".join(state.get("reasons") or [])
+                      or state.get("text") or "授权校验未通过")
+            message = "试用未创建，请联系服务商。原因：%s" % detail
+            self.log(message)
+            self.log(
+                "人工恢复办法：打开面板顶部「查看机器码」取得机器码"
+                "（也保存在 %LOCALAPPDATA%\\HuolongAgent\\publish-worker\\logs\\机器码.txt），"
+                "把机器码和桌面 install-log.txt 发给服务商；服务商可人工恢复试用，"
+                "或签发 8 位激活码（填入面板「激活码」框后点「用激活码激活」），"
+                "或签发 license.json（用包内 import-license.bat 导入）。"
+                "不要自行删除或修改授权文件，也不要反复重装。")
+            self.problems.append(message)
+            self.license_problem_reported = True
+        return False
 
     def step_machine_code(self) -> None:
         self.log("[5/6] machine code")
@@ -2183,7 +2239,12 @@ class Installer:
         self.step_machine_code()
         self.step_start_agent()
         self.step_selfcheck_tool()
+        handover_ok = self.step_license_handover()
         self.step_handover_check()
+        if not handover_ok or self.problems:
+            self.log("[6/6] installation incomplete: %d authorization problem(s); "
+                     "see the recovery instructions above" % len(self.problems))
+            return 5
         self.log("[6/6] installation complete")
         return 0
 
@@ -2215,7 +2276,11 @@ def main(argv=None) -> int:
         print("Installation incomplete. Please send install-log.txt on your Desktop to support.")
         return 5
     inst.flush_desktop_copy()
-    print("Done.")
+    if code != 0:
+        print("Installation incomplete. Please send install-log.txt on your "
+              "Desktop to support.")
+    else:
+        print("Done.")
     return code
 
 

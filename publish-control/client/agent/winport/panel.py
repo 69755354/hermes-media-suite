@@ -280,6 +280,7 @@ def build_state(layout, channels, *, envs=None, tcp=None, processes=None,
             "support_code": (_support_code(layout)
                              if remote_support.get("enabled")
                              and remote_support.get("provisioned") else ""),
+            "auto_activation_available": _auto_activation_available(),
             "publish_status": publish_status(layout),
             "account_count": account_count,
             "account_limit": account_limit,
@@ -1144,8 +1145,29 @@ footer p { margin: 0; }
 _render_html_base = render_html
 
 
+def _auto_activation_available(state=None) -> bool:
+    """Whether this package carries the data ``activation.activate()`` needs.
+
+    The 1.2.192 new-customer package deliberately ships no
+    ``config/activation.json``.  Offering "重试自动授权" there is a dead end:
+    ``activation.activate()`` returns a failure without contacting the server.
+    Keep the button only for packages that really have the enrolment token.
+    """
+    if isinstance(state, dict) and "auto_activation_available" in state:
+        return bool(state["auto_activation_available"])
+    try:
+        from .paths import install_root
+        return (install_root() / "config" / "activation.json").is_file()
+    except Exception:
+        return False
+
+
 def render_html(state):
     page = _render_html_base(state)
+    if not _auto_activation_available(state):
+        page = page.replace(
+            '''<button onclick="licenseAction('activate')">重试自动授权</button>''',
+            '')
     page = page.replace(
         '''onclick="licenseAction('machine-code')"''',
         '''onclick="licenseAction('machine-code', this)"''')

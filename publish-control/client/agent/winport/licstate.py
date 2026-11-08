@@ -44,7 +44,7 @@ STATUS_ZH = {
     "CRYPTO_UNAVAILABLE": "本机缺少可用的密码学后端",
     "SEAT_DENIED": "当前账号未授权或已停用",
     "TRIAL": "试用授权",
-    STATUS_NOT_ACTIVATED: "自动授权尚未完成",
+    STATUS_NOT_ACTIVATED: "尚未导入正式授权",
     STATUS_UNREADABLE: "授权文件损坏或无法解析",
     STATUS_NO_VENDOR_KEY: "供应商公钥缺失或损坏",
     STATUS_TOMBSTONE_FAILED: "防回放墓碑写入失败",
@@ -55,7 +55,9 @@ STATUS_ZH = {
 }
 
 #: The one remediation a customer can actually follow for a broken licence file.
-REIMPORT_STEPS = ("请在控制面板点击「重试自动授权」；仍失败请联系服务商。",)
+REIMPORT_STEPS = ("请点面板顶部「查看机器码」，把机器码发给服务商换取 8 位激活码，"
+                  "填入面板「激活码」框后点「用激活码激活」；也可用服务商签发的 "
+                  "license.json 通过包内 import-license.bat 导入。",)
 REIMPORT_TEXT = "".join(REIMPORT_STEPS)
 
 

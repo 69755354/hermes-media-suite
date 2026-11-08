@@ -136,6 +136,23 @@ def _vendor_key_note(layout: Layout):
     return ok, f"vendor key {reason} ({key_path.name}, {len(key)} bytes)"
 
 
+def _machine_code() -> str:
+    """The machine id the vendor binds a licence / activation code to."""
+    try:
+        from .fingerprint import fingerprint
+        return str(fingerprint().get("machine_id") or "")
+    except Exception:
+        return ""
+
+
+def _activation_hint() -> str:
+    code = _machine_code()
+    machine = "面板顶部「查看机器码」" + (f"（本机机器码：{code}）" if code else "")
+    return ("请打开" + machine + "，把机器码发给服务商换取 8 位激活码，"
+            "填入面板「激活码」框后点「用激活码激活」；也可让服务商签发 "
+            "license.json，再用包内 import-license.bat 导入。")
+
+
 def _license_light(layout: Layout, static):
     """Licence light -- now the SAME verdict the panel and daemon show.
 
@@ -144,8 +161,11 @@ def _license_light(layout: Layout, static):
     JSONDecodeError traceback -- and ``bootstrap.ps1`` calls this module during
     install.  The file is now read through ``licstate.read_license_file`` (never
     raises) and:
-      * file MISSING      -> WARN ("not activated yet", the expected pre-step-6
-                            state; the only case allowed to WARN);
+      * file MISSING + trial valid -> WARN with the remaining days (new-customer
+                            package: the install-time trial is the expected
+                            state before a formal licence arrives);
+      * file MISSING + trial unusable -> RED with the machine code / activation
+                            code route;
       * file damaged / empty / not an object -> RED, Chinese re-import steps, and
                             a NONZERO exit code (EXIT_GATE_RED via run_selftest).
     The signature / machine / clock verdict itself comes from the one shared
@@ -156,8 +176,20 @@ def _license_light(layout: Layout, static):
     key_ok, key_note = _vendor_key_note(layout)
     read = read_license_file(layout.license_file)
     if read["kind"] == "missing":
-        return STATUS_WARN, ("licence not activated yet (expected before step 6); "
-                             + key_note)
+        if not key_ok:
+            return (STATUS_SKIP, f"licence check skipped (static host): {key_note}") \
+                if static else (STATUS_RED, key_note)
+        state = unified_license_state(layout)
+        status = state.get("status")
+        if status == "TRIAL" and state.get("publish_allowed"):
+            return STATUS_WARN, (
+                "未导入正式授权（新客户包正常状态）；试用授权有效，剩余 %s 天。%s"
+                % (state.get("days_left"), _activation_hint()))
+        detail = ("；".join(state.get("reasons") or [])
+                  or state.get("text") or "试用记录不存在或已失效").rstrip("。")
+        return STATUS_RED, (
+            "未找到正式授权（license.json），且试用未创建或已失效：%s。%s"
+            % (detail, _activation_hint()))
     if read["kind"] != "ok":
         return STATUS_RED, (f"授权文件损坏，无法解析（{read['error']}），"
                             "新增发布暂停（抓数与历史数据不受影响）。"
@@ -175,13 +207,32 @@ def _license_light(layout: Layout, static):
     if status in (STATUS_UNREADABLE, "SCHEMA_INVALID"):
         return STATUS_RED, (state.get("text") or
                             ("授权文件损坏或字段异常。" + REIMPORT_TEXT))
-    if status in ("OK", "GRACE"):
+    if status == "OK":
         level = state.get("expiry_level")
-        light = STATUS_GREEN if level in ("none", "30") else STATUS_WARN
-        return light, (f"licence {status} days_left={state.get('days_left')}; "
-                       f"{state.get('text')}；{key_note}")
-    reasons = "；".join(state.get("reasons") or [])
-    return STATUS_RED, (f"licence {status}（{state.get('label')}）：{reasons}"
+        days = state.get("days_left")
+        if level in ("none", "30"):
+            return STATUS_GREEN, (
+                f"licence OK days_left={days}; {state.get('text')}；{key_note}")
+        if level in ("7", "1"):
+            return STATUS_WARN, (
+                f"licence OK days_left={days}; 授权即将到期，剩余 {days} 天，"
+                f"请尽快续期；{state.get('text')}；{key_note}")
+        return STATUS_WARN, (
+            f"licence OK days_left={days}; 授权到期级别 {level}，请尽快续期；"
+            f"{state.get('text')}；{key_note}")
+    if status == "GRACE":
+        return STATUS_WARN, (
+            f"licence GRACE days_left={state.get('days_left')}; "
+            "授权已过期，处于离线宽限期；到期后只停新增发布，"
+            f"抓数与历史数据不受影响；{key_note}")
+    if status == "TRIAL" and state.get("publish_allowed"):
+        return STATUS_WARN, (
+            "未导入正式授权；试用授权有效，剩余 %s 天。%s"
+            % (state.get("days_left"), _activation_hint()))
+    reasons = ("；".join(state.get("reasons") or [])
+               or "授权校验未通过").rstrip("。")
+    return STATUS_RED, (f"licence {status}（{state.get('label')}）：{reasons}。"
+                        + _activation_hint()
                         + (f"；{key_note}" if key_note else ""))
 
 
@@ -228,7 +279,7 @@ def run_selftest(layout: Layout | None = None, *, static=None) -> dict:
     else:
         code = EXIT_OK
     return {"checks": checks, "red": reds, "exit_code": code, "static": static,
-            "layout": layout.describe()}
+            "machine_code": _machine_code(), "layout": layout.describe()}
 
 
 def print_selftest(result: dict) -> None:
@@ -239,6 +290,7 @@ def print_selftest(result: dict) -> None:
     print("=" * 60, flush=True)
     for name, (status, detail) in result["checks"].items():
         print(f"[{status:7}] {name:15} {detail}", flush=True)
+    print(f"机器码: {result.get('machine_code') or '（读取失败）'}", flush=True)
     print("-" * 60, flush=True)
     if result["exit_code"] == EXIT_OK:
         print("SELFTEST: ALL GREEN"

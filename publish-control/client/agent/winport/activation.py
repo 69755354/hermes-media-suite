@@ -173,7 +173,11 @@ def activate(layout):
                     return result
         config_path = install_root() / 'config' / 'activation.json'
         if not config_path.is_file():
-            return {'ok': False, 'reason': '安装包缺少自动激活信息，请联系服务商；无需自行导入授权。'}
+            return {'ok': False,
+                    'reason': '安装包没有自动激活信息。请点面板顶部「查看机器码」，'
+                              '把机器码发给服务商换取 8 位激活码，填入面板「激活码」框后'
+                              '点「用激活码激活」；也可让服务商签发 license.json，'
+                              '再用包内 import-license.bat 导入。'}
         config = json.loads(config_path.read_text(encoding='utf-8-sig'))
         endpoint = config.get('endpoint')
         if endpoint is not None and endpoint != CODE_ENDPOINT:

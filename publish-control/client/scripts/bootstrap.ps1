@@ -515,13 +515,13 @@ if (-not (Test-Path $VenvPy)) {
     }
   }
 
-  Log "[5/6] 正在自动授权，请稍候。"
+  Log "[5/6] 正在检查授权，请稍候。"
   $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   try {
     & $VenvPy -u -m winport.activation --data $DataDir 2>&1 | ForEach-Object { LogNative $_ }
     $activationRc = $LASTEXITCODE
   } finally { $ErrorActionPreference = $eap }
-  if ($activationRc -ne 0) { $stepErrors += '自动授权未完成：请检查网络，在控制面板重试自动授权；仍失败请联系服务商。' }
+  if ($activationRc -ne 0) { $stepErrors += '自动激活未完成：请检查网络；若面板仍提示未授权，请按 CUSTOMER_README 的授权章节取机器码发给服务商，收到 8 位激活码后在面板输入激活，或用包内 import-license.bat 导入 license.json；仍失败请联系服务商。' }
   Log "[6/6] 正在检查安装结果。"
 
   # ---- 7) self-test -------------------------------------------------------
