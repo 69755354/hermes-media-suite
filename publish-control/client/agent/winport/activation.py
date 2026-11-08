@@ -32,6 +32,10 @@ CODE_LENGTH = 8
 CODE_MIN_LENGTH = CODE_LENGTH
 PINNED_HOST = 'xingturgzn.cn'
 CODE_RE = re.compile(r'[A-Za-z0-9]{8}\Z')
+CONTROL_FIELDS = (
+    'control_url', 'customer_id', 'customer_token',
+    'device_id', 'device_token', 'binding_epoch',
+)
 
 
 def normalize_code(raw):
@@ -42,6 +46,61 @@ def normalize_code(raw):
     if CODE_RE.fullmatch(code) is None:
         return ''
     return code.upper()
+
+
+def is_valid_control(control):
+    """True when an activate response carries a usable control binding."""
+    if not isinstance(control, dict):
+        return False
+    if any(field not in control for field in CONTROL_FIELDS):
+        return False
+    url = control.get('control_url')
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != 'https' or not parsed.hostname:
+        return False
+    for field in ('customer_id', 'device_id',
+                  'customer_token', 'device_token'):
+        value = control.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    return True
+
+
+def _write_control_config(layout, control):
+    """Atomically persist the server-issued control binding with mode 0600."""
+    target = Path(layout.data) / 'control.json'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.control-', suffix='.json',
+                                dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(control, out, ensure_ascii=False)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(name, 0o600)
+        os.replace(name, target)
+        os.chmod(target, 0o600)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _install_with_control(layout, document, control):
+    """Install the licence, then bridge a valid control binding to disk."""
+    result = install_document(layout, document)
+    if not result.get('ok') or not is_valid_control(control):
+        return result
+    try:
+        _write_control_config(layout, control)
+    except Exception:  # noqa: BLE001 - licence is already valid; never roll back
+        return {**result,
+                'reason': result.get('reason', '')
+                          + '；接入配置保存失败，请联系服务商。'}
+    return {**result, 'reason': result.get('reason', '') + '；接入已配置。'}
 
 
 def exchange(token, machine_id):
@@ -66,7 +125,7 @@ def exchange(token, machine_id):
     obj = json.loads(raw)
     if not isinstance(obj, dict) or not isinstance(obj.get('license'), dict):
         raise ValueError('激活响应格式错误')
-    return obj['license']
+    return obj
 
 
 def activate_with_code(layout, code):
@@ -88,7 +147,7 @@ def activate_with_code(layout, code):
                             'reason': '已有授权，但防回放墓碑仍无法写入；'
                                       '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需再次激活'}
-        document = exchange(normalized, fingerprint()['machine_id'])
+        response = exchange(normalized, fingerprint()['machine_id'])
         with _LOCK:
             state = unified_license_state(layout)
             if state['publish_allowed'] and state.get('source') != 'trial':
@@ -97,7 +156,8 @@ def activate_with_code(layout, code):
                             'reason': '已有授权，但防回放墓碑仍无法写入；'
                                       '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需再次激活'}
-            return install_document(layout, document)
+            return _install_with_control(layout, response['license'],
+                                         response.get('control'))
     except HTTPError as exc:
         reason = f'激活服务返回 HTTP {exc.code}；请核对激活码或联系服务商。'
     except (TimeoutError, socket.timeout):
@@ -183,7 +243,7 @@ def activate(layout):
         if endpoint is not None and endpoint != CODE_ENDPOINT:
             logging.getLogger(__name__).warning(
                 'activation.json endpoint ignored; pinned endpoint in use')
-        document = exchange(config.get('enrollment_token', ''),
+        response = exchange(config.get('enrollment_token', ''),
                             fingerprint()['machine_id'])
         with _LOCK:
             state = unified_license_state(layout)
@@ -193,7 +253,8 @@ def activate(layout):
                             'reason': '已有授权，但防回放墓碑仍无法写入；'
                                       '请重试或联系服务商。'}
                 return {'ok': True, 'reason': '已有有效授权，无需联网'}
-            return install_document(layout, document)
+            return _install_with_control(layout, response['license'],
+                                         response.get('control'))
     except HTTPError as exc:
         reason = f'授权服务返回 HTTP {exc.code}；请联系服务商核对授权状态。'
     except (TimeoutError, socket.timeout):

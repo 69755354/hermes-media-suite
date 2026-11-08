@@ -27,6 +27,9 @@ from .settings import load_settings
 from .version import APP_NAME_DISPLAY, VERSION
 
 
+CONTROL_RECHECK_INTERVAL = 30.0
+
+
 def _tray_rows(rows, environments):
     """Tray menu rows grouped by environment (one instance per env)."""
     if not environments:
@@ -240,6 +243,68 @@ def _start_agentpoll(layout, logger):
     return poller
 
 
+def _agentpoll_marker_state(layout):
+    """Return the last startup/poller state written by the agentpoll chain."""
+    try:
+        from .jsonio import read_json
+        data = read_json(Path(layout.run) / "agentpoll-status.json",
+                         default=None)
+    except Exception:  # noqa: BLE001 - a malformed marker must not matter
+        return ""
+    return str(data.get("state") or "") if isinstance(data, dict) else ""
+
+
+def _valid_control_file(layout):
+    """Return (path, data) for the first usable control.json, else None."""
+    from .activation import is_valid_control
+    for candidate in (Path(layout.data) / "control.json",
+                      Path(layout.program) / "control.json"):
+        try:
+            if not candidate.is_file():
+                continue
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - unreadable file is not usable yet
+            continue
+        if is_valid_control(data):
+            return candidate, data
+    return None
+
+
+def _control_recheck_once(layout, logger, poller_slot, stop_event=None):
+    """Try agentpoll startup once when a valid control.json has appeared."""
+    found = _valid_control_file(layout)
+    if found is None:
+        return "waiting"
+    candidate, _data = found
+    logger.info("control.json ready at %s; retrying agentpoll startup",
+                candidate)
+    poller = _start_agentpoll(layout, logger)
+    if poller is not None:
+        if stop_event is not None and stop_event.is_set():
+            poller.stop()
+            return "stopped"
+        poller_slot["poller"] = poller
+        return "started"
+    state = _agentpoll_marker_state(layout)
+    if state and state != "disabled":
+        logger.info("agentpoll retry stopped after explicit failure: %s",
+                    state)
+        return "failed"
+    return "disabled"
+
+
+def _control_recheck_loop(layout, logger, stop_event, poller_slot,
+                          interval=None):
+    """Wait for a late control.json without a tight loop or blocking startup."""
+    if interval is None:
+        interval = CONTROL_RECHECK_INTERVAL
+    while not stop_event.wait(interval):
+        outcome = _control_recheck_once(layout, logger, poller_slot,
+                                        stop_event=stop_event)
+        if outcome in ("started", "failed", "stopped"):
+            return
+
+
 def _integrity_gate(layout, logger) -> None:
     """Re-hash the startup chain; log loudly but never block \u6293\u6570."""
     try:
@@ -321,8 +386,27 @@ def _run_agent(layout, logger, args) -> int:
     # chain when CUSTOMER_TOKEN is configured; otherwise a disabled marker is
     # written so the missing layer is visible instead of silently absent.
     agentpoll = None
+    agentpoll_slot = {"poller": None}
+    control_recheck_stop = threading.Event()
     if not args.once:
         agentpoll = _start_agentpoll(layout, logger)
+        agentpoll_slot["poller"] = agentpoll
+        if agentpoll is None and _agentpoll_marker_state(layout) == "disabled":
+            logger.info("agentpoll disabled at startup; rechecking control.json "
+                        "every %.0fs", CONTROL_RECHECK_INTERVAL)
+            threading.Thread(
+                target=_control_recheck_loop,
+                args=(layout, logger, control_recheck_stop, agentpoll_slot),
+                name="control-recheck", daemon=True).start()
+
+    def _stop_agentpoll():
+        nonlocal agentpoll
+        control_recheck_stop.set()
+        poller = agentpoll_slot.get("poller")
+        agentpoll_slot["poller"] = None
+        if poller is not None:
+            poller.stop()
+        agentpoll = None
 
     # Local control panel: the customer's "status lights" screen + login entry.
     # Loopback only.  1.2.5 (GPT review item 8): if it cannot bind we do NOT
@@ -446,8 +530,7 @@ def _run_agent(layout, logger, args) -> int:
         shutdown_event.set()
         if update_loop is not None:
             update_loop.stop()
-        if agentpoll is not None:
-            agentpoll.stop()
+        _stop_agentpoll()
         _clear_ready_marker(layout, logger)
         tray.stop()
         guard.release()
@@ -470,8 +553,7 @@ def _run_agent(layout, logger, args) -> int:
         shutdown_event.set()
         if update_loop is not None:
             update_loop.stop()
-        if agentpoll is not None:
-            agentpoll.stop()
+        _stop_agentpoll()
         if remote is not None:
             remote.stop()
         _clear_ready_marker(layout, logger)
