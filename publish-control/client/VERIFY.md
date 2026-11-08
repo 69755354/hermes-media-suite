@@ -1,8 +1,8 @@
-# 1.2.198 实现验证记录
+# 1.2.199 实现验证记录
 
-本轮聚焦 1.2.197 复核残留 P0-4：control.json 合法但 token 已被轮换/撤销时，客户点「重新获取接入配置」必须强制 exchange 并重启 poller；历史分租户的状态文件必须写共享根；保存 control.json 只能显示「连接中…」，只有真实成功 poll 才显示绿色。实现与 Linux 定向自检不代表 Windows 实机验收或独立终审。
+本轮聚焦 1.2.198 复核的必修 2/必修 3：激活或「重新获取接入配置」成功后，面板每 2 秒轮询 `/api/control-status`，最多 60 秒，命中 `connected`/`error` 立即停止并原地更新；超时停在「连接中…（可稍后刷新页面）」。同时客户端兜底同码重兑：若服务端返回的 `customer_token`/`device_token`/`binding_epoch` 全部未变，则不覆盖 control.json、返回 `ok=False` 并显示「服务端没有签发新的接入凭据，请向服务商索取新的 8 位激活码后再试」。实现与 Linux 定向自检不代表 Windows 实机验收或独立终审。
 
-当前源码分支：VERSION=1.2.198。MANIFEST.json、PACKAGE_BINDING.json、SHA256SUMS.txt 由打包阶段按 1.2.198 统一重算；PACKAGE_BINDING.json 按自绑定设计不计入 SHA256SUMS，其完整性由 MANIFEST 中的规范化自绑定摘要校验（该字段单独定义、非文件原始哈希）。本记录随源码分支交付，打包后清单覆盖本文件自身；任何后续改动都必须重算清单后才能再打包。未上传客户机。
+当前源码分支：VERSION=1.2.199。MANIFEST.json、PACKAGE_BINDING.json、SHA256SUMS.txt 由打包阶段按 1.2.199 统一重算；PACKAGE_BINDING.json 按自绑定设计不计入 SHA256SUMS，其完整性由 MANIFEST 中的规范化自绑定摘要校验（该字段单独定义、非文件原始哈希）。本记录随源码分支交付，打包后清单覆盖本文件自身；任何后续改动都必须重算清单后才能再打包。未上传客户机。
 
 面板仅在实际 PID、owner program/version 与当前包一致时保留 owner，多余 supervisor 不使合法 owner 失效；安装阶段同版本 owner 也先停止并确认退出；旧 owner 先停止并确认退出，新 VBS 在原子 guard 下重试取得锁，覆盖原有 30 秒锁保护期。未知 owner 或异常遗留 guard 仍须人工核实，不自动删除。安装统一失败出口追加原始异常类型、owner 原文与解析、锁状态和日志尾部；面板入口及桌面启动器显式加入包根。已在 Linux /tmp、非包根 cwd 下通过 runpy.run_path 注入接管超时验证弹窗证据，Windows 桌面实测仍待执行。历史 ANSI owner 按 UTF-8→mbcs/GBK→latin-1 回退并记日志；无法证明归属的服务端口占用立即失败。
 
@@ -12,7 +12,13 @@ report 不再使用内置 demo key；心跳与上传均要求显式非空 key（
 
 保留历史约束：注册表异常 fail-closed；星图点击与回读绑定同一 DOM 实例，挂载证据限定同一直接容器；旧 v1 试用不自动重签。enrollment token 为既有扫描白名单，扫描不证明服务端绑定与撤销机制。
 
-本轮自检记录见 `review/FIX_REPORT_1.2.198.md`；历史记录见外部 FIX_REPORT_1.2.167_GPT.md。Windows WMI/VBS、Task Scheduler、双入口竞争及真实发布仍待实机验证。
+本轮自检记录见 `review/FIX_REPORT_1.2.199.md`；历史记录见外部 FIX_REPORT_1.2.167_GPT.md。Windows WMI/VBS、Task Scheduler、双入口竞争及真实发布仍待实机验证。
+
+## 1.2.199 相对 1.2.198 的变更
+- `agent/winport/panel.py`：激活、重试自动授权或「重新获取接入配置」成功后启动状态轮询：立即拉取一次，随后每 2 秒一次，最多 60 秒；`connected`/`error`（或 `level=ok/bad`）立即停止，超时显示「飞书接入：连接中…（可稍后刷新页面）」。只更新 `#control-status-line`，不整页刷新、不覆盖 `#license-result`。重复点击会取消上一轮定时器与在途结果。
+- `agent/winport/activation.py`：`_bridge_control()` 写盘前读取现有合法 control；若 `customer_token`、`device_token`、`binding_epoch` 全部不变，不覆盖 control.json，写 `error` 状态并返回 `ok=False` 与同一原因；`_install_with_control()` / `_complete_existing_control()` 不再把该情况包装成「接入已补齐」。
+- `CUSTOMER_README.txt`：删除「输入同一激活码可恢复」的旧说法，改为未连接时向服务商索取新的 8 位激活码。
+- `tests/test_control_bridge_1199.py`：新增同码同凭据不重写 control 的回归，以及 pending→connected、pending→error、60 秒超时三种 JS DOM 轮询回归。
 
 ## 1.2.198 相对 1.2.197 的变更
 - `agent/winport/activation.py`：`activate_with_code(..., force=True)` 跳过「已有有效授权」早返回，强制走一次 exchange；`refresh_control` 有码时固定 force，无码时提示输入 8 位激活码。新 control 写入后返回 `control_written=True`，面板据此调用 poller 重启。

@@ -1312,12 +1312,51 @@ function applyControlStatus(view) {
   const text = (view && view.text) ? String(view.text) : '飞书接入：未连接（状态未知）';
   line.appendChild(document.createTextNode(text));
 }
-async function refreshControlStatusLine() {
+const CONTROL_STATUS_POLL_MS = 2000;
+const CONTROL_STATUS_TIMEOUT_MS = 60000;
+let controlStatusPollTimer = null;
+let controlStatusPollToken = 0;
+function stopControlStatusPoll() {
+  controlStatusPollToken += 1;
+  if (controlStatusPollTimer !== null) {
+    clearTimeout(controlStatusPollTimer);
+    controlStatusPollTimer = null;
+  }
+}
+async function fetchControlStatusView() {
   try {
     const r = await fetch('/api/control-status', {cache: 'no-store'});
-    if (!r.ok) return;
-    applyControlStatus(await r.json());
-  } catch (e) {}
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+async function pollControlStatus(token, deadline) {
+  controlStatusPollTimer = null;
+  if (token !== controlStatusPollToken) return;
+  const view = await fetchControlStatusView();
+  if (token !== controlStatusPollToken) return;
+  if (view) applyControlStatus(view);
+  const state = view && view.state;
+  const level = view && view.level;
+  if (state === 'connected' || state === 'error'
+      || level === 'ok' || level === 'bad') {
+    stopControlStatusPoll();
+    return;
+  }
+  if (Date.now() >= deadline) {
+    applyControlStatus({state: 'pending', level: 'warn',
+      text: '飞书接入：连接中…（可稍后刷新页面）'});
+    stopControlStatusPoll();
+    return;
+  }
+  controlStatusPollTimer = setTimeout(
+    () => pollControlStatus(token, deadline), CONTROL_STATUS_POLL_MS);
+}
+function startControlStatusPoll() {
+  stopControlStatusPoll();
+  const token = controlStatusPollToken;
+  const deadline = Date.now() + CONTROL_STATUS_TIMEOUT_MS;
+  return pollControlStatus(token, deadline);
 }
 async function licenseAction(kind, btn) {
   const out = document.getElementById('license-result');
@@ -1330,7 +1369,7 @@ async function licenseAction(kind, btn) {
     ok = !!d.ok;
     out.textContent = d.reason || d.machine_id || d.error;
   } catch (e) { out.textContent = '\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u8054\u7cfb\u670d\u52a1\u5546'; }
-  if (kind === 'activate' && ok) await refreshControlStatusLine();
+  if (kind === 'activate' && ok) await startControlStatusPoll();
   if (kind === 'activate' && !ok) await new Promise(resolve => setTimeout(resolve, 1500));
   if (btn) btn.disabled = false;
 }
@@ -1349,7 +1388,7 @@ async function activateWithCode(btn) {
     const d = await r.json();
     ok = !!d.ok;
     out.textContent = d.reason || d.error || '\u5df2\u6fc0\u6d3b';
-    if (ok) await refreshControlStatusLine();
+    if (ok) await startControlStatusPoll();
   } catch (e) { out.textContent = '\u6fc0\u6d3b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5'; }
   if (!ok) await new Promise(resolve => setTimeout(resolve, 1500));
   if (target) target.disabled = false;
@@ -1368,7 +1407,7 @@ async function activateWithCode(btn) {
       body: JSON.stringify({code: code})});
     const d = await r.json();
     out.textContent = d.reason || d.error || '已重新获取接入配置';
-    await refreshControlStatusLine();
+    await startControlStatusPoll();
   } catch (e) { out.textContent = '重新获取接入配置失败，请检查网络后重试'; }
   if (btn) btn.disabled = false;
 }

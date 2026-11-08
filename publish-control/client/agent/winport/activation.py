@@ -37,6 +37,9 @@ CONTROL_FIELDS = (
     'control_url', 'customer_id', 'customer_token',
     'device_id', 'device_token', 'binding_epoch',
 )
+CONTROL_IDENTITY_FIELDS = ('customer_token', 'device_token', 'binding_epoch')
+UNCHANGED_CONTROL_REASON = (
+    '服务端没有签发新的接入凭据，请向服务商索取新的 8 位激活码后再试')
 
 
 def normalize_code(raw):
@@ -125,6 +128,29 @@ def _has_valid_control(layout) -> bool:
     return False
 
 
+def _read_existing_control(layout):
+    """Return the valid control.json this write would replace, or None."""
+    try:
+        data = json.loads((Path(layout.data) / 'control.json').read_text(
+            encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return None
+    return data if is_valid_control(data) else None
+
+
+def _same_control_identity(old, new) -> bool:
+    """True when all three credential fields are unchanged."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return False
+    return all(str(old.get(field)) == str(new.get(field))
+               for field in CONTROL_IDENTITY_FIELDS)
+
+
+def _unchanged_control(control_ok, control_state, control_reason) -> bool:
+    return (not control_ok and control_state == 'error'
+            and control_reason == UNCHANGED_CONTROL_REASON)
+
+
 def _bridge_control(layout, response):
     """Persist the control binding and return (ok, reason, state, written).
 
@@ -135,6 +161,14 @@ def _bridge_control(layout, response):
     control = response.get('control') if isinstance(response, dict) else None
     control_error = _control_error_text(response)
     if is_valid_control(control):
+        previous = _read_existing_control(layout)
+        if previous is not None and _same_control_identity(previous, control):
+            # The server replayed the cached binding for the same code.  A
+            # byte-identical rewrite would look like recovery while the token
+            # is still invalid, so refuse it and tell the customer the truth.
+            _set_control_status(layout, 'error', UNCHANGED_CONTROL_REASON,
+                                control)
+            return False, UNCHANGED_CONTROL_REASON, 'error', False
         try:
             _write_control_config(layout, control)
         except Exception:  # noqa: BLE001 - licence stays valid; report honestly
@@ -158,9 +192,14 @@ def _install_with_control(layout, document, response):
         return result
     control_ok, control_reason, control_state, control_written = _bridge_control(
         layout, response)
-    reason = ('授权已生效，接入已补齐' if control_ok else
-              '授权已生效，但接入未完成：' + control_reason)
-    return {**result, 'reason': reason, 'control_state': control_state,
+    unchanged = _unchanged_control(control_ok, control_state, control_reason)
+    if unchanged:
+        reason = UNCHANGED_CONTROL_REASON
+    else:
+        reason = ('授权已生效，接入已补齐' if control_ok else
+                  '授权已生效，但接入未完成：' + control_reason)
+    return {**result, 'ok': not unchanged, 'reason': reason,
+            'control_state': control_state,
             'control_ok': control_ok, 'control_written': control_written}
 
 
@@ -168,9 +207,13 @@ def _complete_existing_control(layout, response):
     """An existing formal licence stays installed; only bridge control."""
     control_ok, control_reason, control_state, control_written = _bridge_control(
         layout, response)
-    reason = ('授权已生效，接入已补齐' if control_ok else
-              '授权已生效，但接入未完成：' + control_reason)
-    return {'ok': True, 'reason': reason, 'control_state': control_state,
+    unchanged = _unchanged_control(control_ok, control_state, control_reason)
+    if unchanged:
+        reason = UNCHANGED_CONTROL_REASON
+    else:
+        reason = ('授权已生效，接入已补齐' if control_ok else
+                  '授权已生效，但接入未完成：' + control_reason)
+    return {'ok': not unchanged, 'reason': reason, 'control_state': control_state,
             'control_ok': control_ok, 'control_written': control_written}
 
 
