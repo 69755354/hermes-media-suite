@@ -1,4 +1,4 @@
-"""1.2.199: panel status polling and honest same-credential refusal."""
+"""1.2.199/1.2.200: panel polling, control errors and monotonic writes."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -42,10 +44,15 @@ def _formal_state():
             "days_left": 300, "text": "授权有效", "tombstone_error": None}
 
 
-def _response(control):
-    return {"license": {"machine_id": "MACHINE-1",
+def _response(control, *, rotated=None, control_error=None):
+    body = {"license": {"machine_id": "MACHINE-1",
                         "expires_at": "2099-01-01"},
             "control": control}
+    if rotated is not None:
+        body["rotated"] = rotated
+    if control_error is not None:
+        body["control_error"] = control_error
+    return body
 
 
 def _write_control(layout, control):
@@ -55,7 +62,8 @@ def _write_control(layout, control):
     return target
 
 
-def _patch_refresh(tmp_path, monkeypatch, old_control, new_control):
+def _patch_refresh(tmp_path, monkeypatch, old_control, new_control,
+                   *, rotated=None, control_error=None):
     layout = _layout(tmp_path)
     target = _write_control(layout, old_control)
     control_status.write_status(layout, "error", "接入凭据失效")
@@ -64,7 +72,9 @@ def _patch_refresh(tmp_path, monkeypatch, old_control, new_control):
     monkeypatch.setattr(activation, "unified_license_state",
                         lambda *_args, **_kwargs: dict(_formal_state()))
     monkeypatch.setattr(activation, "exchange",
-                        lambda *_args, **_kwargs: _response(dict(new_control)))
+                        lambda *_args, **_kwargs: _response(
+                            dict(new_control), rotated=rotated,
+                            control_error=control_error))
     restarts = []
     handlers = panel.PanelHandlers(
         layout, [],
@@ -77,7 +87,7 @@ def test_same_code_same_credentials_is_not_reported_as_repaired(
         tmp_path, monkeypatch):
     old_control = _control()
     layout, target, handlers, restarts = _patch_refresh(
-        tmp_path, monkeypatch, old_control, _control())
+        tmp_path, monkeypatch, old_control, _control(), rotated=False)
     before_bytes = target.read_bytes()
     before_mtime = target.stat().st_mtime_ns
 
@@ -130,11 +140,125 @@ def test_any_changed_credential_field_is_really_written(
     assert control_status.read_status(layout)["state"] == "pending"
 
 
+@pytest.mark.parametrize("error,expected", [
+    ("control_unreachable", activation.CONTROL_UNREACHABLE_REASON),
+    ("control_admin_rejected", activation.CONTROL_ADMIN_REJECTED_REASON),
+])
+def test_control_error_wins_over_unchanged_credentials(
+        tmp_path, monkeypatch, error, expected):
+    old_control = _control()
+    layout, target, handlers, restarts = _patch_refresh(
+        tmp_path, monkeypatch, old_control, _control(), control_error=error)
+    before = target.read_bytes()
+
+    result = handlers.control_refresh("ABCD1234")
+
+    # The licence is already valid; the control-plane failure is surfaced in the
+    # reason/status without revoking authorisation.
+    assert result["ok"] is True
+    assert "授权已生效，但接入未完成：" in result["reason"]
+    assert expected in result["reason"]
+    assert result["control_written"] is False
+    assert restarts == []
+    assert target.read_bytes() == before
+    status = control_status.read_status(layout)
+    assert status["state"] == "error"
+    assert status["reason"] == expected
+    assert error not in status["reason"]
+
+
+def test_missing_rotated_marker_is_unknown_not_new_code(
+        tmp_path, monkeypatch):
+    old_control = _control()
+    layout, target, handlers, restarts = _patch_refresh(
+        tmp_path, monkeypatch, old_control, _control())
+    before = target.read_bytes()
+
+    result = handlers.control_refresh("ABCD1234")
+
+    assert result["ok"] is False
+    assert result["reason"] == activation.UNCONFIRMED_CONTROL_REASON
+    assert result["reason"] != activation.UNCHANGED_CONTROL_REASON
+    assert "新的 8 位激活码" not in result["reason"]
+    assert restarts == []
+    assert target.read_bytes() == before
+
+
+def test_older_binding_epoch_is_discarded(tmp_path, monkeypatch):
+    old_control = _control(binding_epoch="2")
+    new_control = _control(customer_token="fresh-secret", binding_epoch="1")
+    layout, target, handlers, restarts = _patch_refresh(
+        tmp_path, monkeypatch, old_control, new_control)
+    before = target.read_bytes()
+
+    result = handlers.control_refresh("ABCD1234")
+
+    assert result["ok"] is True
+    assert result["reason"] == activation.STALE_CONTROL_REASON
+    assert result["control_written"] is False
+    assert restarts == []
+    assert target.read_bytes() == before
+
+
+def test_same_code_exchange_and_write_are_serialized(tmp_path, monkeypatch):
+    layout = _layout(tmp_path)
+    target = _write_control(layout, _control(binding_epoch="0"))
+    monkeypatch.setattr(activation, "fingerprint",
+                        lambda: {"machine_id": "MACHINE-1"})
+    monkeypatch.setattr(activation, "unified_license_state",
+                        lambda *_args, **_kwargs: dict(_formal_state()))
+    started = threading.Event()
+    state_lock = threading.Lock()
+    calls = []
+    active = 0
+    max_active = 0
+
+    def _exchange(*_args, **_kwargs):
+        nonlocal active, max_active
+        with state_lock:
+            calls.append(1)
+            index = len(calls)
+            active += 1
+            max_active = max(max_active, active)
+        started.set()
+        if index == 1:
+            time.sleep(0.05)
+            response = _response(_control(binding_epoch="2"))
+        else:
+            time.sleep(0.02)
+            response = _response(_control(binding_epoch="1"))
+        with state_lock:
+            active -= 1
+        return response
+
+    monkeypatch.setattr(activation, "exchange", _exchange)
+    results = []
+
+    def _worker():
+        results.append(activation.activate_with_code(
+            layout, "ABCD1234", force=True))
+
+    first = threading.Thread(target=_worker)
+    second = threading.Thread(target=_worker)
+    first.start()
+    assert started.wait(2)
+    second.start()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert max_active == 1
+    assert json.loads(target.read_text(encoding="utf-8"))["binding_epoch"] == "2"
+    assert any(activation.STALE_CONTROL_REASON in str(result.get("reason"))
+               for result in results)
+
+
 _NODE_HARNESS = r'''
 const vm = require('vm');
 const fs = require('fs');
 const code = fs.readFileSync(0, 'utf8');
 const statusResponses = __STATUS_RESPONSES__;
+const activateResponse = __ACTIVATE_RESPONSE__;
 
 function ClassList(initial) {
   this.values = new Set(initial || []);
@@ -271,7 +395,7 @@ const sandbox = {
   fetch: (url) => {
     urls.push(String(url));
     if (String(url).includes('/api/activate-code')) {
-      return answer({ok: true, reason: '授权已生效，接入已补齐'});
+      return answer(activateResponse || {ok: true, reason: '授权已生效，接入已补齐'});
     }
     if (String(url).includes('/api/control-refresh')) {
       return answer({ok: true, reason: '已重新获取接入配置'});
@@ -297,7 +421,7 @@ Promise.resolve(sandbox.__testResult).then((value) => {
 '''
 
 
-def _run_polling_js(page, expression, status_responses):
+def _run_polling_js(page, expression, status_responses, activate_response=None):
     if shutil.which("node") is None:
         pytest.skip("node is not installed")
     scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
@@ -328,7 +452,9 @@ void (globalThis.__testResult = (async () => {
 '''.replace("__EXPRESSION__", expression)
     harness = _NODE_HARNESS.replace(
         "__STATUS_RESPONSES__",
-        json.dumps(status_responses, ensure_ascii=False))
+        json.dumps(status_responses, ensure_ascii=False)).replace(
+            "__ACTIVATE_RESPONSE__",
+            json.dumps(activate_response, ensure_ascii=False))
     completed = subprocess.run(
         ["node", "-e", harness], input=code, text=True,
         capture_output=True, timeout=20)
@@ -395,6 +521,42 @@ def test_pending_timeout_stops_after_sixty_seconds(tmp_path):
         responses)
 
     assert result["line"] == "飞书接入：连接中…（可稍后刷新页面）"
+    assert "st-warn" in result["lineClass"].split()
+    assert result["result"] == "授权已生效，接入已补齐"
+    assert result["statusCalls"] == 31
+    assert result["remainingTimers"] == 0
+    assert result["delays"] == [2000] * 30
+    assert result["clock"] == 60000
+
+
+def test_activate_failure_refreshes_status_line_once(tmp_path):
+    page = _rendered_page(tmp_path)
+    failure = "服务端未确认已换发新凭据，请稍后再点「重新获取接入配置」"
+    responses = [_status("error", "bad", "飞书接入：未连接（接入凭据失效）")]
+
+    result = _run_polling_js(
+        page, "activateWithCode(document.getElementById('act-code-btn'))",
+        responses, activate_response={"ok": False, "reason": failure})
+
+    assert result["line"] == "飞书接入：未连接（接入凭据失效）"
+    assert "st-bad" in result["lineClass"].split()
+    assert result["result"] == failure
+    assert result["statusCalls"] == 1
+    assert result["remainingTimers"] == 0
+    assert result["delays"] == []
+
+
+def test_timeout_after_poller_stopped_says_restart_panel(tmp_path):
+    page = _rendered_page(tmp_path)
+    responses = [
+        _status("disabled", "warn", "飞书接入：未连接（接入服务已停止）"),
+    ]
+
+    result = _run_polling_js(
+        page, "activateWithCode(document.getElementById('act-code-btn'))",
+        responses)
+
+    assert result["line"] == "飞书接入：接入服务已停止，请重启面板"
     assert "st-warn" in result["lineClass"].split()
     assert result["result"] == "授权已生效，接入已补齐"
     assert result["statusCalls"] == 31

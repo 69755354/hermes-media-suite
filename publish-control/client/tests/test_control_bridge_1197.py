@@ -208,8 +208,11 @@ def test_runtime_poll_failure_is_visible_over_valid_control(
         raise error
 
     monkeypatch.setattr(agentpoll, "poll_once", _fail)
-    with pytest.raises(type(error)):
-        poller.run_once()
+    # 1.2.200: one transient failure is only a log entry; the second
+    # consecutive failure is what becomes customer-visible.
+    for _ in range(2):
+        with pytest.raises(type(error)):
+            poller.run_once()
 
     status = control_status.read_status(layout)
     assert status["state"] == "error"

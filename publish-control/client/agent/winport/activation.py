@@ -39,7 +39,14 @@ CONTROL_FIELDS = (
 )
 CONTROL_IDENTITY_FIELDS = ('customer_token', 'device_token', 'binding_epoch')
 UNCHANGED_CONTROL_REASON = (
-    '服务端没有签发新的接入凭据，请向服务商索取新的 8 位激活码后再试')
+    '服务端明确未签发新凭据（未轮换）；同一激活码可重兑并换发新凭据，'
+    '请稍后再点「重新获取接入配置」；仍提示未签发新凭据时再向服务商'
+    '索取新的 8 位激活码')
+UNCONFIRMED_CONTROL_REASON = (
+    '服务端未确认已换发新凭据，请稍后再点「重新获取接入配置」')
+STALE_CONTROL_REASON = '已获取更新的接入配置，无需覆盖'
+CONTROL_UNREACHABLE_REASON = '控制面连不上，稍后再点「重新获取接入配置」'
+CONTROL_ADMIN_REJECTED_REASON = '服务商侧授权配置异常，请联系服务商'
 
 
 def normalize_code(raw):
@@ -101,6 +108,81 @@ def _control_error_text(response) -> str:
     return text[:control_status.MAX_REASON]
 
 
+def _control_error_reason(response) -> str:
+    """Map stable server error codes to customer-facing guidance."""
+    value = _control_error_text(response)
+    if not value:
+        return ''
+    normalized = value.strip().lower()
+    if normalized in ('control_unreachable', 'control_timeout'):
+        return CONTROL_UNREACHABLE_REASON
+    if normalized in ('control_admin_rejected', 'control_auth_rejected'):
+        return CONTROL_ADMIN_REJECTED_REASON
+    return value
+
+
+def _rotation_state(response):
+    """Return True/False when the server explicitly says it rotated, else None.
+
+    Old servers do not send this marker.  ``None`` means "unknown" and must not
+    be treated as "the server refused to rotate".
+    """
+    if not isinstance(response, dict):
+        return None
+    candidates = [response]
+    control = response.get('control')
+    if isinstance(control, dict):
+        candidates.append(control)
+    value = None
+    for candidate in candidates:
+        if 'rotated' in candidate:
+            value = candidate.get('rotated')
+            break
+    else:
+        for candidate in candidates:
+            if 'rotate_skipped' in candidate:
+                skipped = candidate.get('rotate_skipped')
+                if isinstance(skipped, bool):
+                    return not skipped
+                return None
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ('true', '1', 'yes'):
+            return True
+        if text in ('false', '0', 'no'):
+            return False
+    return None
+
+
+def _control_epoch(control):
+    value = control.get('binding_epoch') if isinstance(control, dict) else None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_control_epoch(layout):
+    try:
+        data = json.loads((Path(layout.data) / 'control.json').read_text(
+            encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return None
+    return _control_epoch(data)
+
+
+def _older_than_existing(layout, control) -> bool:
+    old_epoch = _read_control_epoch(layout)
+    new_epoch = _control_epoch(control)
+    return (old_epoch is not None and new_epoch is not None
+            and new_epoch < old_epoch)
+
+
 def _set_control_status(layout, state, reason='', control=None) -> None:
     """Best-effort customer-visible status; never includes a token."""
     try:
@@ -148,7 +230,8 @@ def _same_control_identity(old, new) -> bool:
 
 def _unchanged_control(control_ok, control_state, control_reason) -> bool:
     return (not control_ok and control_state == 'error'
-            and control_reason == UNCHANGED_CONTROL_REASON)
+            and control_reason in (UNCHANGED_CONTROL_REASON,
+                                   UNCONFIRMED_CONTROL_REASON))
 
 
 def _bridge_control(layout, response):
@@ -159,16 +242,32 @@ def _bridge_control(layout, response):
     ``pending`` until the poller completes its first successful poll.
     """
     control = response.get('control') if isinstance(response, dict) else None
-    control_error = _control_error_text(response)
+    if _control_error_text(response):
+        # A control-plane failure is not proof that the code is exhausted.  The
+        # reason must win over the "credentials look unchanged" cache replay.
+        if (is_valid_control(control)
+                and _older_than_existing(layout, control)):
+            return True, STALE_CONTROL_REASON, 'pending', False
+        control_error = _control_error_reason(response)
+        _set_control_status(layout, 'error', control_error,
+                            control if is_valid_control(control) else None)
+        return False, control_error, 'error', False
     if is_valid_control(control):
         previous = _read_existing_control(layout)
-        if previous is not None and _same_control_identity(previous, control):
-            # The server replayed the cached binding for the same code.  A
-            # byte-identical rewrite would look like recovery while the token
-            # is still invalid, so refuse it and tell the customer the truth.
-            _set_control_status(layout, 'error', UNCHANGED_CONTROL_REASON,
-                                control)
-            return False, UNCHANGED_CONTROL_REASON, 'error', False
+        if _older_than_existing(layout, control):
+            # Another tab already saved a newer binding.  Do not let this
+            # older response overwrite it.
+            return True, STALE_CONTROL_REASON, 'pending', False
+        if previous is not None:
+            if _same_control_identity(previous, control):
+                # A byte-identical rewrite would look like recovery while the
+                # token is still invalid, so refuse it and tell the customer
+                # only what the server actually confirmed.
+                rotation = _rotation_state(response)
+                reason = (UNCHANGED_CONTROL_REASON if rotation is False
+                          else UNCONFIRMED_CONTROL_REASON)
+                _set_control_status(layout, 'error', reason, control)
+                return False, reason, 'error', False
         try:
             _write_control_config(layout, control)
         except Exception:  # noqa: BLE001 - licence stays valid; report honestly
@@ -177,9 +276,6 @@ def _bridge_control(layout, response):
             return False, reason, 'error', False
         _set_control_status(layout, 'pending', '', control)
         return True, '接入已补齐', 'pending', True
-    if control_error:
-        _set_control_status(layout, 'error', control_error, control)
-        return False, control_error, 'error', False
     reason = '服务端未返回接入配置'
     _set_control_status(layout, 'missing', reason, control)
     return False, reason, 'missing', False
@@ -194,7 +290,11 @@ def _install_with_control(layout, document, response):
         layout, response)
     unchanged = _unchanged_control(control_ok, control_state, control_reason)
     if unchanged:
-        reason = UNCHANGED_CONTROL_REASON
+        reason = control_reason
+    elif control_reason == STALE_CONTROL_REASON:
+        reason = STALE_CONTROL_REASON
+    elif control_ok and control_reason not in ('', '接入已补齐'):
+        reason = '授权已生效，' + control_reason
     else:
         reason = ('授权已生效，接入已补齐' if control_ok else
                   '授权已生效，但接入未完成：' + control_reason)
@@ -209,7 +309,11 @@ def _complete_existing_control(layout, response):
         layout, response)
     unchanged = _unchanged_control(control_ok, control_state, control_reason)
     if unchanged:
-        reason = UNCHANGED_CONTROL_REASON
+        reason = control_reason
+    elif control_reason == STALE_CONTROL_REASON:
+        reason = STALE_CONTROL_REASON
+    elif control_ok and control_reason not in ('', '接入已补齐'):
+        reason = '授权已生效，' + control_reason
     else:
         reason = ('授权已生效，接入已补齐' if control_ok else
                   '授权已生效，但接入未完成：' + control_reason)
@@ -268,6 +372,9 @@ def activate_with_code(layout, code, *, force=False):
         return {'ok': False, 'reason': '激活码格式不对，请核对后重试'}
     existing_before = False
     try:
+        # Keep the exchange and the write in one critical section.  Two panel
+        # tabs redeeming the same code can otherwise write an older response
+        # after a newer one.
         with _LOCK:
             state = unified_license_state(layout)
             existing_before = _formal(state)
@@ -280,8 +387,7 @@ def activate_with_code(layout, code, *, force=False):
                     return {'ok': True, 'reason': '已有有效授权，无需再次激活',
                             'control_state': 'pending', 'control_ok': True,
                             'control_written': False}
-        response = exchange(normalized, fingerprint()['machine_id'])
-        with _LOCK:
+            response = exchange(normalized, fingerprint()['machine_id'])
             state = unified_license_state(layout)
             if _formal(state):
                 if state.get('tombstone_error') and _has_valid_control(layout):

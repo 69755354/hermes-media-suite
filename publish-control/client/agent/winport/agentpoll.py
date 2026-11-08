@@ -975,6 +975,8 @@ def process_command(config, command, runner=None):
 class AgentPoller:
     """Poll loop with network backoff; safe to run in a daemon thread."""
 
+    CONTROL_FAILURE_THRESHOLD = 2
+
     def __init__(self, config, stop_event=None, runner=None, logger=None,
                  sleep=None):
         self.config = config
@@ -988,6 +990,7 @@ class AgentPoller:
         self._status_data = {
             "state": "starting",
             "consecutive_failures": 0,
+            "poll_failures": 0,
             "last_error": None,
             "client_version": VERSION,
             "capabilities": list(CLIENT_CAPABILITIES),
@@ -1024,14 +1027,24 @@ class AgentPoller:
 
     def _note_error(self, state, exc):
         with self._status_lock:
-            failures = int(self._status_data.get("consecutive_failures") or 0) + 1
+            failures = int(self._status_data.get(
+                "consecutive_failures") or 0) + 1
+            poll_failures = int(self._status_data.get("poll_failures") or 0)
+            if state in ("auth_error", "poll_error"):
+                poll_failures += 1
         self._status(
             state=state,
             last_error=f"{type(exc).__name__}: {exc}",
             last_error_at=time.time(),
             consecutive_failures=failures,
+            poll_failures=poll_failures,
         )
-        if state in ("auth_error", "poll_error"):
+        # A single transient failure is only a log entry.  While stopping, an
+        # in-flight 401 belongs to the old poller and must not overwrite the
+        # new control.json's pending/connected status.
+        if (state in ("auth_error", "poll_error")
+                and not self.stop_event.is_set()
+                and poll_failures >= self.CONTROL_FAILURE_THRESHOLD):
             self._report_control_status(
                 "error", self._control_error_reason(state, exc))
 
@@ -1051,7 +1064,11 @@ class AgentPoller:
         """Best-effort customer-visible status; write failures never stop polling."""
         try:
             from .control_status import write_status
-            write_status(_layout(self.config), state, reason,
+            token = str(getattr(self.config, "token", "") or "")
+            text = str(reason or "")
+            if token:
+                text = text.replace(token, "[redacted]")
+            write_status(_layout(self.config), state, text,
                          customer_id=self.config.customer_id,
                          device_id=self.config.device_id)
         except Exception as exc:  # noqa: BLE001 - observability is not fatal
@@ -1059,7 +1076,12 @@ class AgentPoller:
 
     def _note_poll_success(self):
         """Record a real successful poll (used for the panel green light)."""
-        self._report_control_status("connected")
+        with self._status_lock:
+            self._status_data["consecutive_failures"] = 0
+            self._status_data["poll_failures"] = 0
+            self._status_data["last_error"] = None
+        if not self.stop_event.is_set():
+            self._report_control_status("connected")
 
     def _flush_pending(self):
         state = _state_for(self.config)
@@ -1323,6 +1345,7 @@ class AgentPoller:
         return self.thread
 
     def _run_guarded(self):
+        failed = False
         try:
             self.run()
         except Exception as exc:  # noqa: BLE001 - must leave a visible marker
@@ -1330,6 +1353,13 @@ class AgentPoller:
             self._status(state="fatal", fatal=True,
                          last_error=f"{type(exc).__name__}: {exc}",
                          last_error_at=time.time())
+            if not self.stop_event.is_set():
+                failed = True
+                self._report_control_status(
+                    "error",
+                    f"接入服务异常退出：{type(exc).__name__}: {exc}")
+        if not failed:
+            self._report_control_status("disabled", "接入服务已停止")
 
 
 def start_background(config=None, **kwargs):

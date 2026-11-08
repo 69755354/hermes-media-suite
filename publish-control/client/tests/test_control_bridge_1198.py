@@ -185,8 +185,9 @@ def test_historical_tenant_poller_writes_shared_status_visible_to_panel(
         raise agentpoll.AuthError("HTTP 401")
 
     monkeypatch.setattr(agentpoll, "poll_once", _unauthorized)
-    with pytest.raises(agentpoll.AuthError):
-        poller.run_once()
+    for _ in range(2):
+        with pytest.raises(agentpoll.AuthError):
+            poller.run_once()
 
     shared = Path(layout.data) / "control-status.json"
     tenant = Path(config.layout.root) / "control-status.json"

@@ -1344,8 +1344,13 @@ async function pollControlStatus(token, deadline) {
     return;
   }
   if (Date.now() >= deadline) {
-    applyControlStatus({state: 'pending', level: 'warn',
-      text: '飞书接入：连接中…（可稍后刷新页面）'});
+    if (state === 'disabled') {
+      applyControlStatus({state: 'disabled', level: 'warn',
+        text: '飞书接入：接入服务已停止，请重启面板'});
+    } else {
+      applyControlStatus({state: 'pending', level: 'warn',
+        text: '飞书接入：连接中…（可稍后刷新页面）'});
+    }
     stopControlStatusPoll();
     return;
   }
@@ -1390,7 +1395,11 @@ async function activateWithCode(btn) {
     out.textContent = d.reason || d.error || '\u5df2\u6fc0\u6d3b';
     if (ok) await startControlStatusPoll();
   } catch (e) { out.textContent = '\u6fc0\u6d3b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5'; }
-  if (!ok) await new Promise(resolve => setTimeout(resolve, 1500));
+  if (!ok) {
+    stopControlStatusPoll();
+    const view = await fetchControlStatusView();
+    if (view) applyControlStatus(view);
+  }
   if (target) target.disabled = false;
 }'''
     page = page.replace(old_js, new_js)

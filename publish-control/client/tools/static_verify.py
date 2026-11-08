@@ -31,8 +31,15 @@ from winport.downlink import Downlink, FileSystemSource  # noqa: E402
 from winport.errors import CanaryNotArmed, ConfigError, GateRed  # noqa: E402
 from winport.fingerprint import fingerprint  # noqa: E402
 from winport.license import check_license  # noqa: E402
-import devsign  # noqa: E402
-from devsign import mint_dev_license, issue_receipt_for_test  # noqa: E402
+try:
+    import devsign  # noqa: E402
+    from devsign import mint_dev_license, issue_receipt_for_test  # noqa: E402
+    DEV_SIGN_AVAILABLE = True
+except ImportError:
+    devsign = None
+    mint_dev_license = None
+    issue_receipt_for_test = None
+    DEV_SIGN_AVAILABLE = False
 from winport.minimal_xlsx import read_xlsx, write_xlsx  # noqa: E402
 from winport.paths import Layout  # noqa: E402
 from winport.publish_exec import (MODE_APPROVED, MODE_FILL, NullDriver,  # noqa: E402
@@ -41,12 +48,18 @@ from winport.publish_exec import (MODE_APPROVED, MODE_FILL, NullDriver,  # noqa:
 from winport import humanize as humanize_mod  # noqa: E402
 from winport import publish_guard as publish_guard  # noqa: E402
 from winport.settings import load_settings  # noqa: E402
-from receipt_fixture import ReceiptDriver as NullDriver
+try:
+    from receipt_fixture import ReceiptDriver  # noqa: E402
+    RECEIPT_FIXTURE_AVAILABLE = True
+except ImportError:
+    ReceiptDriver = None
+    RECEIPT_FIXTURE_AVAILABLE = False
 from winport.stage2_ledger import Stage2Ledger  # noqa: E402
 from winport import onboard  # noqa: E402
 from winport.subprocess_text import text_mode_options  # noqa: E402
 
 RESULTS = []
+SKIPS = []
 
 
 def read_script_text(path):
@@ -72,6 +85,12 @@ def check(name, condition, detail=""):
     return bool(condition)
 
 
+def skip(name, detail=""):
+    """Record a check that needs developer-only helpers absent from the package."""
+    SKIPS.append((name, detail))
+    print(f"[SKIP] {name}" + (f"  -- {detail}" if detail else ""))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="winport-verify-"))
     layout = Layout(program=ROOT, data=tmp / "data", system=tmp / "system").ensure()
@@ -93,17 +112,22 @@ def main() -> int:
                                            "bios_uuid": "UUID-A"})["machine_id"])
 
     print("== licence (Ed25519, machine-bound) ==")
-    seed = os.urandom(32)
-    public = devsign.publickey(seed)
-    future = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
-    lic = mint_dev_license(seed, machine_id="MACHINE-A", expires_at=future)
-    check("valid licence -> OK",
-          check_license(lic, public, "MACHINE-A")["status"] == "OK")
-    check("copied licence -> MACHINE_MISMATCH",
-          check_license(lic, public, "MACHINE-B")["status"] == "MACHINE_MISMATCH")
-    tampered = dict(lic, customer_id="attacker")
-    check("tampered licence -> SIGNATURE_INVALID",
-          check_license(tampered, public, "MACHINE-A")["status"] == "SIGNATURE_INVALID")
+    if DEV_SIGN_AVAILABLE:
+        seed = os.urandom(32)
+        public = devsign.publickey(seed)
+        future = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
+        lic = mint_dev_license(seed, machine_id="MACHINE-A", expires_at=future)
+        check("valid licence -> OK",
+              check_license(lic, public, "MACHINE-A")["status"] == "OK")
+        check("copied licence -> MACHINE_MISMATCH",
+              check_license(lic, public, "MACHINE-B")["status"] == "MACHINE_MISMATCH")
+        tampered = dict(lic, customer_id="attacker")
+        check("tampered licence -> SIGNATURE_INVALID",
+              check_license(tampered, public, "MACHINE-A")["status"]
+              == "SIGNATURE_INVALID")
+    else:
+        skip("licence (Ed25519, machine-bound)",
+             "devsign unavailable in this package")
 
     print("== manifest validation ==")
     good = make_fixture.build_bucket(tmp / "bucket")
@@ -192,38 +216,52 @@ def main() -> int:
     except CanaryNotArmed:
         blocked = True
     check("approved mode needs canary", blocked)
-    seed = os.urandom(32)
-    pub = devsign.publickey(seed)
-    receipt = issue_receipt_for_test(seed, plan)
-    try:
-        run_publish(plan, NullDriver(), led, mode=MODE_APPROVED, canary_armed=True,
-                    post_fill_green=True, receipt=None, verify_key=pub,
-                    allow_simulated=True)
-        blocked = False
-    except GateRed:
-        blocked = True
-    check("approved mode needs a control-plane receipt", blocked)
-    # 1.2.5: a simulated driver must be refused unless the caller opts in.
-    try:
-        run_publish(plan, NullDriver(), led, mode=MODE_APPROVED, canary_armed=True,
-                    post_fill_green=True, receipt=receipt, verify_key=pub)
-        refused = False
-    except GateRed:
-        refused = True
-    check("simulated driver refused without opt-in (no auto-submit)", refused)
-    ok_run = run_publish(plan, NullDriver(platform_work_id="7697584059211402536"), led,
-                         mode=MODE_APPROVED, canary_armed=True, post_fill_green=True,
-                         receipt=receipt, verify_key=pub, allow_simulated=True)
-    check("harness: approved publish reads back a platform work id",
-          ok_run["published"] and ok_run["platform_work_id"] == "7697584059211402536")
-    try:
-        run_publish(plan, NullDriver(platform_work_id="2222222222222222222"), led, mode=MODE_APPROVED,
-                    canary_armed=True, post_fill_green=True, receipt=receipt,
-                    verify_key=pub, allow_simulated=True)
-        blocked = False
-    except GateRed:
-        blocked = True
-    check("idempotency blocks a second publish", blocked)
+    if DEV_SIGN_AVAILABLE and RECEIPT_FIXTURE_AVAILABLE:
+        seed = os.urandom(32)
+        pub = devsign.publickey(seed)
+        receipt = issue_receipt_for_test(seed, plan)
+        try:
+            run_publish(plan, ReceiptDriver(), led, mode=MODE_APPROVED,
+                        canary_armed=True, post_fill_green=True, receipt=None,
+                        verify_key=pub, allow_simulated=True)
+            blocked = False
+        except GateRed:
+            blocked = True
+        check("approved mode needs a control-plane receipt", blocked)
+        # 1.2.5: a simulated driver must be refused unless the caller opts in.
+        try:
+            run_publish(plan, ReceiptDriver(), led, mode=MODE_APPROVED,
+                        canary_armed=True, post_fill_green=True,
+                        receipt=receipt, verify_key=pub)
+            refused = False
+        except GateRed:
+            refused = True
+        check("simulated driver refused without opt-in (no auto-submit)",
+              refused)
+        ok_run = run_publish(
+            plan, ReceiptDriver(platform_work_id="7697584059211402536"), led,
+            mode=MODE_APPROVED, canary_armed=True, post_fill_green=True,
+            receipt=receipt, verify_key=pub, allow_simulated=True)
+        check("harness: approved publish reads back a platform work id",
+              ok_run["published"]
+              and ok_run["platform_work_id"] == "7697584059211402536")
+        try:
+            run_publish(
+                plan, ReceiptDriver(platform_work_id="2222222222222222222"),
+                led, mode=MODE_APPROVED, canary_armed=True,
+                post_fill_green=True, receipt=receipt, verify_key=pub,
+                allow_simulated=True)
+            blocked = False
+        except GateRed:
+            blocked = True
+        check("idempotency blocks a second publish", blocked)
+    else:
+        for name in (
+                "approved mode needs a control-plane receipt",
+                "simulated driver refused without opt-in (no auto-submit)",
+                "harness: approved publish reads back a platform work id",
+                "idempotency blocks a second publish"):
+            skip(name, "devsign/receipt_fixture unavailable in this package")
 
     print("== redaction ==")
     red = logutil.redact("https://oss/x?Signature=SECRET Cookie: a=b Bearer zz.yy")
@@ -238,11 +276,15 @@ def main() -> int:
     check("vendor key is 32 bytes of hex", len(key_bytes) == 32)
     ok, reason = ed25519_pure.public_key_valid(key_bytes)
     check("vendor key is a usable Ed25519 point", ok, reason)
-    forged_seed = os.urandom(32)
-    forged = devsign.sign(b"x", forged_seed,
-                               devsign.publickey(forged_seed))
-    check("signature from another key is refused",
-          not ed25519_pure.verify(forged, b"x", key_bytes))
+    if DEV_SIGN_AVAILABLE:
+        forged_seed = os.urandom(32)
+        forged = devsign.sign(b"x", forged_seed,
+                              devsign.publickey(forged_seed))
+        check("signature from another key is refused",
+              not ed25519_pure.verify(forged, b"x", key_bytes))
+    else:
+        skip("signature from another key is refused",
+             "devsign unavailable in this package")
 
     # ---- G2: the launcher prefers the interpreter the wheels went into ------
     print("== G2 launcher interpreter ==")
@@ -495,19 +537,24 @@ def main() -> int:
           len(alerts) == 1 and alerts[0]["env_id"] == "env_1")
 
     from winport.license import expiry_notices, publish_gate
-    seed2 = os.urandom(32)
-    public2 = devsign.publickey(seed2)
-    lic_soon = mint_dev_license(seed2, machine_id="M1", expires_at=(
-        datetime.now(timezone.utc) + timedelta(days=3)).isoformat())
-    check("E expiry notice fires the 7-day threshold",
-          expiry_notices(lic_soon)["level"] == "7"
-          and not expiry_notices(lic_soon)["expiry_blocks_publish"])
-    lic_dead = mint_dev_license(seed2, machine_id="M1", grace_days=14,
-                                expires_at=(datetime.now(timezone.utc)
-                                            - timedelta(days=40)).isoformat())
-    gate = publish_gate(lic_dead, public2, "M1")
-    check("E expired licence blocks publish but not collect/data",
-          gate["publish_allowed"] is False and gate["collect_allowed"] is True)
+    if DEV_SIGN_AVAILABLE:
+        seed2 = os.urandom(32)
+        public2 = devsign.publickey(seed2)
+        lic_soon = mint_dev_license(seed2, machine_id="M1", expires_at=(
+            datetime.now(timezone.utc) + timedelta(days=3)).isoformat())
+        check("E expiry notice fires the 7-day threshold",
+              expiry_notices(lic_soon)["level"] == "7"
+              and not expiry_notices(lic_soon)["expiry_blocks_publish"])
+        lic_dead = mint_dev_license(seed2, machine_id="M1", grace_days=14,
+                                    expires_at=(datetime.now(timezone.utc)
+                                                - timedelta(days=40)).isoformat())
+        gate = publish_gate(lic_dead, public2, "M1")
+        check("E expired licence blocks publish but not collect/data",
+              gate["publish_allowed"] is False
+              and gate["collect_allowed"] is True)
+    else:
+        skip("E licence expiry notices",
+             "devsign unavailable in this package")
 
     # ---- 1.2.1 self-service install: machine code + offline licence import ---
     print("== 1.2.1 self-service install chain ==")
@@ -519,15 +566,8 @@ def main() -> int:
     self_tmp = Path(tempfile.mkdtemp(prefix="winport-selfserve-"))
     program = self_tmp / "program"
     (program / "config").mkdir(parents=True, exist_ok=True)
-    seed3 = os.urandom(32)
-    public3 = devsign.publickey(seed3)
-    (program / "config" / "vendor_pubkey.hex").write_text(public3.hex(),
-                                                          encoding="utf-8")
     lay3 = Layout(program=program, data=self_tmp / "data",
                   system=self_tmp / "system").ensure()
-    fp3 = {"machine_id": "MACHINE-SELF", "weak": False,
-           "components": {"machine_guid": "G", "volume_serial": "S"},
-           "stable_component_count": 2, "platform": "windows"}
 
     info = onboard.machine_code_info(
         components={"machine_guid": "G", "volume_serial": "S"})
@@ -538,41 +578,59 @@ def main() -> int:
     check("机器码 file carries the code + the 3 next steps",
           info["machine_id"] in mc_text and "license.json" in mc_text)
 
-    future = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
-    good = mint_dev_license(seed3, machine_id=fp3["machine_id"],
-                            expires_at=future)
-    good_path = self_tmp / "license.json"
-    good_path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
-    res = onboard.import_license(lay3, good_path, fingerprint_info=fp3,
-                                 allow_test_injection=True,
-                                 public_key_override=public3)
-    check("licence import installs a valid, correctly-bound licence",
-          res["installed"] and res["status"] == "OK"
-          and lay3.license_file.exists(), res.get("reason", ""))
+    if DEV_SIGN_AVAILABLE:
+        seed3 = os.urandom(32)
+        public3 = devsign.publickey(seed3)
+        (program / "config" / "vendor_pubkey.hex").write_text(
+            public3.hex(), encoding="utf-8")
+        fp3 = {"machine_id": "MACHINE-SELF", "weak": False,
+               "components": {"machine_guid": "G", "volume_serial": "S"},
+               "stable_component_count": 2, "platform": "windows"}
+        future = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+        good = mint_dev_license(seed3, machine_id=fp3["machine_id"],
+                                expires_at=future)
+        good_path = self_tmp / "license.json"
+        good_path.write_text(json.dumps(good, ensure_ascii=False),
+                             encoding="utf-8")
+        res = onboard.import_license(lay3, good_path, fingerprint_info=fp3,
+                                     allow_test_injection=True,
+                                     public_key_override=public3)
+        check("licence import installs a valid, correctly-bound licence",
+              res["installed"] and res["status"] == "OK"
+              and lay3.license_file.exists(), res.get("reason", ""))
 
-    other = mint_dev_license(seed3, machine_id="SOMEONE-ELSE",
-                             expires_at=future)
-    other_path = self_tmp / "other.json"
-    other_path.write_text(json.dumps(other, ensure_ascii=False), encoding="utf-8")
-    lay4 = Layout(program=program, data=self_tmp / "data4",
-                  system=self_tmp / "system4").ensure()
-    res2 = onboard.import_license(lay4, other_path, fingerprint_info=fp3,
-                                  allow_test_injection=True,
-                                  public_key_override=public3)
-    check("licence import refuses another machine's licence",
-          (not res2["installed"]) and res2["status"] == "MACHINE_MISMATCH"
-          and not lay4.license_file.exists())
+        other = mint_dev_license(seed3, machine_id="SOMEONE-ELSE",
+                                 expires_at=future)
+        other_path = self_tmp / "other.json"
+        other_path.write_text(json.dumps(other, ensure_ascii=False),
+                              encoding="utf-8")
+        lay4 = Layout(program=program, data=self_tmp / "data4",
+                      system=self_tmp / "system4").ensure()
+        res2 = onboard.import_license(lay4, other_path, fingerprint_info=fp3,
+                                      allow_test_injection=True,
+                                      public_key_override=public3)
+        check("licence import refuses another machine's licence",
+              (not res2["installed"]) and res2["status"] == "MACHINE_MISMATCH"
+              and not lay4.license_file.exists())
 
-    forged = mint_dev_license(os.urandom(32), machine_id=fp3["machine_id"],
-                              expires_at=future)
-    forged_path = self_tmp / "forged.json"
-    forged_path.write_text(json.dumps(forged, ensure_ascii=False),
-                           encoding="utf-8")
-    res3 = onboard.import_license(lay4, forged_path, fingerprint_info=fp3,
-                                  allow_test_injection=True,
-                                  public_key_override=public3)
-    check("licence import refuses a bad-signature licence",
-          (not res3["installed"]) and res3["status"] == "SIGNATURE_INVALID")
+        forged = mint_dev_license(os.urandom(32),
+                                  machine_id=fp3["machine_id"],
+                                  expires_at=future)
+        forged_path = self_tmp / "forged.json"
+        forged_path.write_text(json.dumps(forged, ensure_ascii=False),
+                               encoding="utf-8")
+        res3 = onboard.import_license(lay4, forged_path, fingerprint_info=fp3,
+                                      allow_test_injection=True,
+                                      public_key_override=public3)
+        check("licence import refuses a bad-signature licence",
+              (not res3["installed"])
+              and res3["status"] == "SIGNATURE_INVALID")
+    else:
+        for name in (
+                "licence import installs a valid, correctly-bound licence",
+                "licence import refuses another machine's licence",
+                "licence import refuses a bad-signature licence"):
+            skip(name, "devsign unavailable in this package")
 
     # the Windows entry points the customer actually double-clicks
     scripts = ROOT / "scripts"
@@ -785,7 +843,7 @@ def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     total = len(RESULTS)
     print("-" * 60)
-    print(f"STATIC VERIFY: {passed}/{total} checks passed")
+    print(f"STATIC VERIFY: {passed}/{total} checks passed, {len(SKIPS)} skipped")
     print("-" * 60)
     return 0 if passed == total else 2
 
