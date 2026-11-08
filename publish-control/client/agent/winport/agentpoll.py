@@ -1031,6 +1031,35 @@ class AgentPoller:
             last_error_at=time.time(),
             consecutive_failures=failures,
         )
+        if state in ("auth_error", "poll_error"):
+            self._report_control_status(
+                "error", self._control_error_reason(state, exc))
+
+    @staticmethod
+    def _control_error_reason(state, exc):
+        """Customer-friendly control status reason; never includes a token."""
+        text = f"{state or ''} {type(exc).__name__} {exc}".lower()
+        if str(state or "").lower() in ("auth_error", "auth_failed"):
+            return "接入凭据失效"
+        if any(token in text for token in (
+                "401", "403", "authentication", "unauthorized", "forbidden",
+                "鉴权", "认证失败")):
+            return "接入凭据失效"
+        return "控制面连不上"
+
+    def _report_control_status(self, state, reason=""):
+        """Best-effort customer-visible status; write failures never stop polling."""
+        try:
+            from .control_status import write_status
+            write_status(_layout(self.config), state, reason,
+                         customer_id=self.config.customer_id,
+                         device_id=self.config.device_id)
+        except Exception as exc:  # noqa: BLE001 - observability is not fatal
+            self.log.warning("could not write control status: %s", exc)
+
+    def _note_poll_success(self):
+        """Record a real successful poll (used for the panel green light)."""
+        self._report_control_status("connected")
 
     def _flush_pending(self):
         state = _state_for(self.config)
@@ -1054,6 +1083,7 @@ class AgentPoller:
         except Exception as exc:  # noqa: BLE001 - record before re-raising
             self._note_error("poll_error", exc)
             raise
+        self._note_poll_success()
         if not command:
             self._status(state="idle", last_poll_at=time.time(),
                          last_error=None, consecutive_failures=0)
@@ -1159,6 +1189,7 @@ class AgentPoller:
                 delay = next_backoff(delay, self.config.poll_interval,
                                      self.config.max_backoff)
                 continue
+            self._note_poll_success()
             delay = max(1.0, self.config.poll_interval)
             self._status(state="polling", channel=channel,
                          last_poll_at=time.time(), last_error=None,
@@ -1232,6 +1263,7 @@ class AgentPoller:
                                          self.config.max_backoff)
                     continue
 
+                self._note_poll_success()
                 delay = max(1.0, self.config.poll_interval)
                 self._status(state="polling", last_poll_at=time.time(),
                              last_error=None, consecutive_failures=0)

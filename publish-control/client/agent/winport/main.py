@@ -30,6 +30,19 @@ from .version import APP_NAME_DISPLAY, VERSION
 CONTROL_RECHECK_INTERVAL = 30.0
 CONTROL_RECHECK_MAX_SECONDS = 24 * 60 * 60
 
+#: Stable artifacts that only ever exist below a historical per-customer root.
+#: They must not include ``<data>/inbox``: startup calls ``Layout.ensure()``
+#: before this check, which always creates that directory at the shared root.
+TENANT_LAYOUT_MARKERS = (
+    "config",
+    "run",
+    "inbox",
+    "out",
+    "system",
+    "accounts.json",
+    "config/accounts.json",
+)
+
 
 def _tray_rows(rows, environments):
     """Tray menu rows grouped by environment (one instance per env)."""
@@ -178,8 +191,11 @@ def _single_root_for(layout, customer_id) -> bool:
     """Default to a dedicated single root; keep historical tenant layouts.
 
     The panel, accounts, inbox and profiles live in ``<data>`` on a dedicated
-    customer machine.  Only an old multi-tenant tree (``customers/<id>`` exists
-    while ``<data>/inbox`` does not) still needs the scoped root.
+    customer machine.  Only an old multi-tenant tree still needs the scoped
+    root.  Historical trees are recognised by real artifacts inside
+    ``customers/<id>`` rather than by the absence of ``<data>/inbox``:
+    ``Layout.ensure()`` has already created the shared inbox by the time this
+    runs, so the old negative test could never match in production.
     """
     from .customer_paths import DEFAULT_CUSTOMER_ID, normalize_customer_id
     try:
@@ -189,7 +205,15 @@ def _single_root_for(layout, customer_id) -> bool:
     if cid == DEFAULT_CUSTOMER_ID:
         return True
     tenant = Path(layout.data) / "customers" / cid
-    return not (tenant.is_dir() and not (Path(layout.data) / "inbox").exists())
+    if not tenant.is_dir():
+        return True
+    for marker in TENANT_LAYOUT_MARKERS:
+        try:
+            if (tenant / marker).exists():
+                return False
+        except OSError:
+            continue
+    return True
 
 
 def _start_agentpoll(layout, logger):
@@ -287,10 +311,10 @@ def _start_agentpoll(layout, logger):
         return None
     logger.info("agentpoll started customer=%s control=%s",
                 config.customer_id, config.control_url)
-    if control_data is not None:
-        _write_control_status(layout, logger, "connected",
-                              customer_id=config.customer_id,
-                              device_id=config.device_id)
+    # Do not report "connected" merely because the poller thread started or
+    # control.json is valid.  The poller itself writes that status after its
+    # first successful poll (and writes error/disabled when the control plane
+    # rejects the credentials or cannot be reached).
     try:
         from .remote_agent import start_remote_agent
         start_remote_agent(config, logger=logger)

@@ -17,8 +17,18 @@ STATES = ("connected", "missing", "error", "disabled")
 MAX_REASON = 300
 
 
+def _data_dir(layout) -> Path:
+    """Resolve the worker data root from either Layout or CustomerLayout."""
+    data = getattr(layout, "data", None)
+    if data is None:
+        data = getattr(layout, "root", None)
+    if data is None:
+        raise AttributeError("layout has no data root")
+    return Path(data)
+
+
 def status_path(layout) -> Path:
-    return Path(layout.data) / "control-status.json"
+    return _data_dir(layout) / "control-status.json"
 
 
 def _clean_reason(reason) -> str:

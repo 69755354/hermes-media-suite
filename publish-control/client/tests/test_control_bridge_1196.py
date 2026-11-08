@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import stat
 import threading
 from pathlib import Path
@@ -101,14 +100,14 @@ def test_standard_layout_poller_data_is_worker_root(tmp_path, monkeypatch):
 
 def test_historical_tenant_layout_keeps_scoped_data_root(tmp_path, monkeypatch):
     layout = _layout(tmp_path)
-    shutil.rmtree(Path(layout.data) / "inbox")
     tenant = Path(layout.data) / "customers" / "c_123"
-    tenant.mkdir(parents=True)
+    (tenant / "run").mkdir(parents=True)
     (Path(layout.data) / "control.json").write_text(
         json.dumps(_control()), encoding="utf-8")
 
     poller = _start(layout, monkeypatch)
 
+    assert (Path(layout.data) / "inbox").is_dir()
     assert poller.config.single_root is False
     assert _argv_data(poller.config) == tenant
 

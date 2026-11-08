@@ -422,13 +422,17 @@ def _auth_view(licence) -> dict:
 def control_banner(layout) -> dict:
     """The customer-visible Feishu/control bridge status.
 
-    The status file records the last provisioning attempt, but the on-disk
-    control.json is the source of truth: a deleted/corrupt file must never show
-    green just because an old status line said "connected".
+    The on-disk control.json proves that provisioning produced a binding, but
+    it does not prove that the control plane accepts it right now.  A newer
+    runtime ``error``/``disabled`` status (written by the poller after an
+    authentication or network failure) must therefore win over a valid file.
+    A deleted/corrupt control.json still never shows green merely because an
+    old status line said "connected".
     """
     from .activation import is_valid_control
     from .control_status import read_status
     valid_control = False
+    valid_mtime = None
     candidates = [Path(layout.data) / "control.json"]
     program = getattr(layout, "program", None)
     if program:
@@ -440,10 +444,31 @@ def control_banner(layout) -> dict:
             continue
         if is_valid_control(data):
             valid_control = True
+            try:
+                mtime = candidate.stat().st_mtime
+            except OSError:
+                mtime = None
+            valid_mtime = mtime
             break
     status = read_status(layout) or {}
     state = status.get("state") or "missing"
     reason = status.get("reason") or ""
+    updated = status.get("updated")
+    try:
+        updated = float(updated) if updated is not None else None
+    except (TypeError, ValueError):
+        updated = None
+    if (valid_control and state in ("error", "disabled")
+            and updated is not None and valid_mtime is not None
+            and updated >= valid_mtime):
+        if state == "error":
+            level = "bad"
+            reason = reason or "接入配置失败"
+        else:
+            level = "warn"
+            reason = reason or "接入服务未启动"
+        return {"state": state, "level": level, "reason": reason,
+                "text": "飞书接入：未连接（%s）" % reason}
     if valid_control:
         return {"state": "connected", "level": "ok", "reason": "",
                 "text": "飞书接入：已连接"}
@@ -1260,7 +1285,31 @@ async function activateWithCode() {
     if (d.ok) setTimeout(() => location.reload(), 900);
   } catch (e) { out.textContent = '\u6fc0\u6d3b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5'; }
 }'''
-    new_js = '''async function licenseAction(kind, btn) {
+    new_js = '''function controlStatusClass(level) {
+  if (level === 'ok') return 'st-ok';
+  if (level === 'bad') return 'st-bad';
+  return 'st-warn';
+}
+function applyControlStatus(view) {
+  const line = document.getElementById('control-status-line');
+  if (!line) return;
+  const cls = controlStatusClass(view && view.level);
+  setStatusClass(line, cls);
+  setStatusClass(line.querySelector('.dot'), cls);
+  for (const node of Array.from(line.childNodes)) {
+    if (node.nodeType === 3) line.removeChild(node);
+  }
+  const text = (view && view.text) ? String(view.text) : '飞书接入：未连接（状态未知）';
+  line.appendChild(document.createTextNode(text));
+}
+async function refreshControlStatusLine() {
+  try {
+    const r = await fetch('/api/control-status', {cache: 'no-store'});
+    if (!r.ok) return;
+    applyControlStatus(await r.json());
+  } catch (e) {}
+}
+async function licenseAction(kind, btn) {
   const out = document.getElementById('license-result');
   if (btn) btn.disabled = true;
   out.textContent = '\u6b63\u5728\u5904\u7406\uff0c\u8bf7\u7a0d\u5019\u2026';
@@ -1271,6 +1320,7 @@ async function activateWithCode() {
     ok = !!d.ok;
     out.textContent = d.reason || d.machine_id || d.error;
   } catch (e) { out.textContent = '\u64cd\u4f5c\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u8054\u7cfb\u670d\u52a1\u5546'; }
+  if (kind === 'activate' && ok) await refreshControlStatusLine();
   if (kind === 'activate' && !ok) await new Promise(resolve => setTimeout(resolve, 1500));
   if (btn) btn.disabled = false;
 }
@@ -1289,6 +1339,7 @@ async function activateWithCode(btn) {
     const d = await r.json();
     ok = !!d.ok;
     out.textContent = d.reason || d.error || '\u5df2\u6fc0\u6d3b';
+    if (ok) await refreshControlStatusLine();
   } catch (e) { out.textContent = '\u6fc0\u6d3b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5'; }
   if (!ok) await new Promise(resolve => setTimeout(resolve, 1500));
   if (target) target.disabled = false;
@@ -1307,6 +1358,7 @@ async function activateWithCode(btn) {
       body: JSON.stringify({code: code})});
     const d = await r.json();
     out.textContent = d.reason || d.error || '已重新获取接入配置';
+    await refreshControlStatusLine();
   } catch (e) { out.textContent = '重新获取接入配置失败，请检查网络后重试'; }
   if (btn) btn.disabled = false;
 }
