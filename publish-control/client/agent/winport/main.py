@@ -28,6 +28,7 @@ from .version import APP_NAME_DISPLAY, VERSION
 
 
 CONTROL_RECHECK_INTERVAL = 30.0
+CONTROL_RECHECK_MAX_SECONDS = 24 * 60 * 60
 
 
 def _tray_rows(rows, environments):
@@ -162,6 +163,35 @@ def _write_agentpoll_marker(layout, logger, **fields) -> None:
         logger.warning("could not write agentpoll status: %s", exc)
 
 
+def _write_control_status(layout, logger, state, reason="", *,
+                          customer_id="", device_id="") -> None:
+    """Best-effort customer-visible Feishu/control connection status."""
+    try:
+        from .control_status import write_status
+        write_status(layout, state, reason, customer_id=customer_id,
+                     device_id=device_id)
+    except Exception as exc:  # noqa: BLE001 - never block the panel
+        logger.warning("could not write control status: %s", exc)
+
+
+def _single_root_for(layout, customer_id) -> bool:
+    """Default to a dedicated single root; keep historical tenant layouts.
+
+    The panel, accounts, inbox and profiles live in ``<data>`` on a dedicated
+    customer machine.  Only an old multi-tenant tree (``customers/<id>`` exists
+    while ``<data>/inbox`` does not) still needs the scoped root.
+    """
+    from .customer_paths import DEFAULT_CUSTOMER_ID, normalize_customer_id
+    try:
+        cid = normalize_customer_id(customer_id)
+    except (TypeError, ValueError):
+        return True
+    if cid == DEFAULT_CUSTOMER_ID:
+        return True
+    tenant = Path(layout.data) / "customers" / cid
+    return not (tenant.is_dir() and not (Path(layout.data) / "inbox").exists())
+
+
 def _start_agentpoll(layout, logger):
     """Start the control-plane poller as part of the normal startup chain.
 
@@ -178,29 +208,36 @@ def _start_agentpoll(layout, logger):
         logger.error("agentpoll unavailable: %s", exc)
         _write_agentpoll_marker(layout, logger, state="import_error",
                                 last_error=f"{type(exc).__name__}: {exc}")
+        _write_control_status(layout, logger, "disabled",
+                              f"接入组件不可用：{type(exc).__name__}: {exc}")
         return None
     overlay = {}
-    for candidate in (Path(layout.data) / "control.json",
-                      Path(layout.program) / "control.json"):
-        try:
-            if candidate.is_file():
-                data = json.loads(candidate.read_text(encoding="utf-8"))
-                for key, env_name in (("control_url", "CONTROL_URL"),
-                                      ("customer_id", "CUSTOMER_ID"),
-                                      ("customer_token", "CUSTOMER_TOKEN"),
-                                      ("device_id", "DEVICE_ID"),
-                                      ("device_token", "DEVICE_TOKEN"),
-                                      ("binding_epoch", "DEVICE_BINDING_EPOCH")):
-                    value = str(data.get(key) or "").strip()
-                    if value:
-                        overlay[env_name] = value
-                if overlay:
-                    logger.info("agentpoll config loaded from %s", candidate)
-                break
-        except Exception as exc:  # noqa: BLE001 - bad file must not kill panel
-            logger.warning("control.json ignored (%s): %s", candidate, exc)
+    control_data = None
+    found = _valid_control_file(layout)
+    if found is not None:
+        candidate, control_data = found
+        for key, env_name in (("control_url", "CONTROL_URL"),
+                              ("customer_id", "CUSTOMER_ID"),
+                              ("customer_token", "CUSTOMER_TOKEN"),
+                              ("device_id", "DEVICE_ID"),
+                              ("device_token", "DEVICE_TOKEN"),
+                              ("binding_epoch", "DEVICE_BINDING_EPOCH")):
+            if key in control_data and control_data[key] is not None:
+                value = str(control_data[key]).strip()
+                if value:
+                    overlay[env_name] = value
+        logger.info("agentpoll config loaded from %s", candidate)
+    else:
+        _write_control_status(layout, logger, "missing",
+                              "尚未获取有效的接入配置")
     merged_env = dict(os.environ)
     merged_env.update(overlay)
+    customer_id = (
+        merged_env.get("CUSTOMER_ID")
+        or merged_env.get("WINPORT_CUSTOMER_ID")
+        or merged_env.get("AGENT_CUSTOMER_ID")
+        or "default")
+    single_root = _single_root_for(layout, customer_id)
     try:
         config = AgentConfig.from_env(
             env=merged_env,
@@ -208,22 +245,33 @@ def _start_agentpoll(layout, logger):
             system_root=str(layout.system),
             program_dir=str(layout.program),
             cli_root=str(layout.program),
+            status_file=str(Path(layout.run) / "agentpoll-status.json"),
+            single_root=single_root,
             require_explicit_control_url=True,
         )
     except ValueError as exc:
         logger.info("agentpoll disabled: %s", exc)
         _write_agentpoll_marker(layout, logger, state="disabled",
                                 reason=str(exc))
+        _write_control_status(layout, logger, "disabled", str(exc),
+                              customer_id=customer_id)
         return None
     except Exception as exc:  # noqa: BLE001 - bad config is reported
         logger.error("agentpoll config failed: %s", exc)
         _write_agentpoll_marker(layout, logger, state="config_error",
                                 last_error=f"{type(exc).__name__}: {exc}")
+        _write_control_status(layout, logger, "disabled",
+                              f"接入配置错误：{type(exc).__name__}: {exc}",
+                              customer_id=customer_id)
         return None
     if not config.token:
         write_status(config, state="disabled",
                      reason="CUSTOMER_TOKEN is not configured")
         logger.info("agentpoll disabled: CUSTOMER_TOKEN is not configured")
+        _write_control_status(layout, logger, "disabled",
+                              "接入配置缺少 customer token",
+                              customer_id=config.customer_id,
+                              device_id=config.device_id)
         return None
     try:
         poller = AgentPoller(config, logger=logger)
@@ -232,9 +280,17 @@ def _start_agentpoll(layout, logger):
         logger.error("agentpoll startup failed: %s", exc)
         write_status(config, state="startup_error",
                      last_error=f"{type(exc).__name__}: {exc}")
+        _write_control_status(layout, logger, "disabled",
+                              f"接入服务启动失败：{type(exc).__name__}: {exc}",
+                              customer_id=config.customer_id,
+                              device_id=config.device_id)
         return None
     logger.info("agentpoll started customer=%s control=%s",
                 config.customer_id, config.control_url)
+    if control_data is not None:
+        _write_control_status(layout, logger, "connected",
+                              customer_id=config.customer_id,
+                              device_id=config.device_id)
     try:
         from .remote_agent import start_remote_agent
         start_remote_agent(config, logger=logger)
@@ -243,15 +299,31 @@ def _start_agentpoll(layout, logger):
     return poller
 
 
-def _agentpoll_marker_state(layout):
-    """Return the last startup/poller state written by the agentpoll chain."""
+def _agentpoll_marker(layout):
+    """Return the last startup/poller marker written by the agentpoll chain."""
     try:
         from .jsonio import read_json
         data = read_json(Path(layout.run) / "agentpoll-status.json",
                          default=None)
     except Exception:  # noqa: BLE001 - a malformed marker must not matter
-        return ""
-    return str(data.get("state") or "") if isinstance(data, dict) else ""
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _agentpoll_marker_state(layout):
+    """Return the last startup/poller state written by the agentpoll chain."""
+    return str(_agentpoll_marker(layout).get("state") or "")
+
+
+def _is_auth_failure(state, detail) -> bool:
+    """Only an explicit control-plane rejection stops the recheck thread."""
+    text = f"{state or ''} {detail or ''}".lower()
+    if str(state or '').lower() in ("auth_error", "auth_failed",
+                                    "unauthorized", "forbidden"):
+        return True
+    return any(token in text for token in (
+        "401", "403", "authentication failed", "authentication rejected",
+        "unauthorized", "forbidden", "鉴权", "认证失败"))
 
 
 def _valid_control_file(layout):
@@ -285,23 +357,33 @@ def _control_recheck_once(layout, logger, poller_slot, stop_event=None):
             return "stopped"
         poller_slot["poller"] = poller
         return "started"
-    state = _agentpoll_marker_state(layout)
-    if state and state != "disabled":
-        logger.info("agentpoll retry stopped after explicit failure: %s",
-                    state)
-        return "failed"
-    return "disabled"
+    marker = _agentpoll_marker(layout)
+    state = str(marker.get("state") or "")
+    detail = str(marker.get("last_error") or marker.get("reason") or "")
+    if _is_auth_failure(state, detail):
+        logger.error("agentpoll retry stopped after explicit auth failure: %s",
+                     detail or state)
+        return "auth_failed"
+    logger.info("agentpoll retry will continue: %s", detail or state or "unknown")
+    return "retry"
 
 
 def _control_recheck_loop(layout, logger, stop_event, poller_slot,
-                          interval=None):
+                          interval=None, max_seconds=None):
     """Wait for a late control.json without a tight loop or blocking startup."""
     if interval is None:
         interval = CONTROL_RECHECK_INTERVAL
+    if max_seconds is None:
+        max_seconds = CONTROL_RECHECK_MAX_SECONDS
+    deadline = time.monotonic() + max(0.0, float(max_seconds))
     while not stop_event.wait(interval):
         outcome = _control_recheck_once(layout, logger, poller_slot,
                                         stop_event=stop_event)
-        if outcome in ("started", "failed", "stopped"):
+        if outcome in ("started", "stopped", "auth_failed"):
+            return
+        if time.monotonic() >= deadline:
+            logger.warning("control recheck stopped after %.0f hour(s) of "
+                           "transient failures", float(max_seconds) / 3600.0)
             return
 
 

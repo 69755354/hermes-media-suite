@@ -1,8 +1,8 @@
-﻿# 1.2.176 实现验证记录
+﻿# 1.2.196 实现验证记录
 
-本轮补全 supervisor 退出诊断、安装握手失败与面板启动失败的实际原因；面板保留已验证 owner，仅停止多余 supervisor；安装同版本重装也先停 supervisor 再停 agent，避免 60 秒崩溃退避。前轮 report key、清理枚举与镜像白名单修复保留。实现与 Linux 定向自检不代表 Windows 实机验收或独立终审。
+本轮聚焦 1.2.195 复核 P0：poller 数据根与 worker 对齐、已有正式授权时可补接入、`control_error` 客户可见、面板常驻显示飞书接入状态；同时区分复查线程的显式鉴权失败与瞬时连接失败。实现与 Linux 定向自检不代表 Windows 实机验收或独立终审。
 
-当前实物：VERSION=1.2.175，MANIFEST.json version=1.2.175，PACKAGE_BINDING.json version=1.2.175，SHA256SUMS.txt 覆盖 MANIFEST 中 3203 个非自绑定条目；PACKAGE_BINDING.json 按自绑定设计不计入 SHA256SUMS，其完整性由 MANIFEST 中的规范化自绑定摘要校验（该字段单独定义、非文件原始哈希）；打包阶段已按客户要求统一重算四件套并完成 build_bundle verify（ok=true）。本记录随包交付，清单覆盖本文件自身；任何后续改动都必须重算清单后才能再打包。未上传客户机。
+当前源码分支：VERSION=1.2.196。MANIFEST.json、PACKAGE_BINDING.json、SHA256SUMS.txt 由打包阶段按 1.2.196 统一重算；PACKAGE_BINDING.json 按自绑定设计不计入 SHA256SUMS，其完整性由 MANIFEST 中的规范化自绑定摘要校验（该字段单独定义、非文件原始哈希）。本记录随源码分支交付，打包后清单覆盖本文件自身；任何后续改动都必须重算清单后才能再打包。未上传客户机。
 
 面板仅在实际 PID、owner program/version 与当前包一致时保留 owner，多余 supervisor 不使合法 owner 失效；安装阶段同版本 owner 也先停止并确认退出；旧 owner 先停止并确认退出，新 VBS 在原子 guard 下重试取得锁，覆盖原有 30 秒锁保护期。未知 owner 或异常遗留 guard 仍须人工核实，不自动删除。安装统一失败出口追加原始异常类型、owner 原文与解析、锁状态和日志尾部；面板入口及桌面启动器显式加入包根。已在 Linux /tmp、非包根 cwd 下通过 runpy.run_path 注入接管超时验证弹窗证据，Windows 桌面实测仍待执行。历史 ANSI owner 按 UTF-8→mbcs/GBK→latin-1 回退并记日志；无法证明归属的服务端口占用立即失败。
 
@@ -12,7 +12,15 @@ report 不再使用内置 demo key；心跳与上传均要求显式非空 key（
 
 保留历史约束：注册表异常 fail-closed；星图点击与回读绑定同一 DOM 实例，挂载证据限定同一直接容器；旧 v1 试用不自动重签。enrollment token 为既有扫描白名单，扫描不证明服务端绑定与撤销机制。
 
-自检记录见外部 FIX_REPORT_1.2.167_GPT.md；Windows WMI/VBS、Task Scheduler、双入口竞争及真实发布仍待实机验证。
+本轮自检记录见 `review/FIX_REPORT_1.2.196.md`；历史记录见外部 FIX_REPORT_1.2.167_GPT.md。Windows WMI/VBS、Task Scheduler、双入口竞争及真实发布仍待实机验证。
+
+## 1.2.196 相对 1.2.195 的变更
+- `agent/winport/main.py`：专用单客户机默认 `single_root=True`，poller/worker 的 `--data` 等于面板与素材所在的 `<data>` 根；仅当历史 `<data>/customers/<customer_id>` 存在且 `<data>/inbox` 不存在时保留租户根。
+- `agent/winport/activation.py`：已有正式授权但 `control.json` 缺失/无效时，继续执行一次 exchange 补齐接入；补接入失败不回退已有授权，并区分「授权已生效，接入已补齐」与「授权已生效，但接入未完成：原因」。
+- `agent/winport/control_status.py`（新增）：原子写入 `0600` 的 `<data>/control-status.json`，记录 `connected|missing|error|disabled`、原因、时间、customer_id、device_id，不写 token。
+- `agent/winport/panel.py`：授权区块常驻显示「飞书接入：已连接 / 未连接（原因）」，新增「重新获取接入配置」按钮（走一次 exchange，无激活码时提示输入）。
+- `agent/winport/main.py`：复查线程只在 401/403 等显式鉴权失败时停止；连接失败/超时按 30 秒继续重试，最多 24 小时。
+- `CUSTOMER_README.txt`：明确试用期内飞书发布/抓取不可用，需要激活后自动接入，并说明「飞书接入：已连接」才算开通完成。
 
 ## 1.2.176 相对 1.2.175 的变更
 - `agent/winport/publish_exec.py`：pre-submit 窗口不再无条件抑制 hold。验证码、短信验证、风控、登录失效四类故障即使发生在 fill 阶段（点发布之前）也写入通道冻结，避免账号异常后队列继续撞墙；其余 fill 前置失败仍只回收账本占位、不冻结，可安全重试。异常文本与 `extra` 中的页面证据都会参与故障分类。

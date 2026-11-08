@@ -26,6 +26,7 @@ import logging
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import chrome, health
@@ -273,6 +274,7 @@ def build_state(layout, channels, *, envs=None, tcp=None, processes=None,
                                or r.get("env_id") in {e.env_id for e in visible_envs}]),
             "chrome": chrome_banner(layout, report=chrome_report),
             "license": header_license,
+            "control": control_banner(layout),
             "evidence": evidence_banner(layout),
             "cadence": cadence_mod.cadence_view(layout),
             "remote_channel": __import__("winport.settings", fromlist=["load_settings"]).load_settings(layout.settings_file).get("remote_channel", {"enabled": True}),
@@ -415,6 +417,49 @@ def _auth_view(licence) -> dict:
     if (licence or {}).get("level") == "ok" and status is None:
         return {"level": "ok", "text": "\u6388\u6743\u6709\u6548"}
     return {"level": "warn", "text": "\u6388\u6743\u9700\u8981\u5904\u7406"}
+
+
+def control_banner(layout) -> dict:
+    """The customer-visible Feishu/control bridge status.
+
+    The status file records the last provisioning attempt, but the on-disk
+    control.json is the source of truth: a deleted/corrupt file must never show
+    green just because an old status line said "connected".
+    """
+    from .activation import is_valid_control
+    from .control_status import read_status
+    valid_control = False
+    candidates = [Path(layout.data) / "control.json"]
+    program = getattr(layout, "program", None)
+    if program:
+        candidates.append(Path(program) / "control.json")
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if is_valid_control(data):
+            valid_control = True
+            break
+    status = read_status(layout) or {}
+    state = status.get("state") or "missing"
+    reason = status.get("reason") or ""
+    if valid_control:
+        return {"state": "connected", "level": "ok", "reason": "",
+                "text": "飞书接入：已连接"}
+    if state == "connected":
+        state, reason = "missing", "接入配置文件缺失，请点「重新获取接入配置」"
+    if state == "missing":
+        reason = reason or "尚未获取接入配置，请用激活码激活或点「重新获取接入配置」"
+        level = "warn"
+    elif state == "error":
+        level = "bad"
+        reason = reason or "接入配置失败"
+    else:
+        level = "warn"
+        reason = reason or "接入服务未启动"
+    return {"state": state, "level": level, "reason": reason,
+            "text": "飞书接入：未连接（%s）" % reason}
 
 
 def _worst_license(items):
@@ -1164,6 +1209,21 @@ def _auto_activation_available(state=None) -> bool:
 
 def render_html(state):
     page = _render_html_base(state)
+    control = state.get("control") or {}
+    control_class = {"ok": "st-ok", "warn": "st-warn",
+                     "bad": "st-bad"}.get(control.get("level"), "st-muted")
+    control_text = html.escape(str(control.get("text")
+                                   or "飞书接入：未连接（尚未获取接入配置）"))
+    page = page.replace(
+        '''</div>\n<button onclick="licenseAction('machine-code')">''',
+        '''  <span class="item" id="control-status-line"><span class="dot '''
+        + control_class + '''"></span>''' + control_text
+        + '''</span>\n</div>\n<button onclick="licenseAction('machine-code')">''')
+    page = page.replace(
+        '''<button onclick="activateWithCode()">用激活码激活</button></div>''',
+        '''<button onclick="activateWithCode()">用激活码激活</button>'''
+        '''<button id="control-refresh-btn" onclick="refreshControl(this)">'''
+        '''重新获取接入配置</button></div>''')
     if not _auto_activation_available(state):
         page = page.replace(
             '''<button onclick="licenseAction('activate')">重试自动授权</button>''',
@@ -1229,12 +1289,30 @@ async function activateWithCode(btn) {
     const d = await r.json();
     ok = !!d.ok;
     out.textContent = d.reason || d.error || '\u5df2\u6fc0\u6d3b';
-    if (d.ok) setTimeout(() => location.reload(), 900);
   } catch (e) { out.textContent = '\u6fc0\u6d3b\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5'; }
   if (!ok) await new Promise(resolve => setTimeout(resolve, 1500));
   if (target) target.disabled = false;
 }'''
-    return page.replace(old_js, new_js)
+    page = page.replace(old_js, new_js)
+    refresh_js = '''async function refreshControl(btn) {
+  const out = document.getElementById('license-result');
+  const input = document.getElementById('act-code');
+  const code = input ? input.value.trim() : '';
+  if (!code) { out.textContent = '请在激活码框输入服务商提供的 8 位激活码，再点「重新获取接入配置」'; return; }
+  if (btn) btn.disabled = true;
+  out.textContent = '正在重新获取接入配置，请稍候…';
+  try {
+    const r = await fetch('/api/control-refresh', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: code})});
+    const d = await r.json();
+    out.textContent = d.reason || d.error || '已重新获取接入配置';
+  } catch (e) { out.textContent = '重新获取接入配置失败，请检查网络后重试'; }
+  if (btn) btn.disabled = false;
+}
+'''
+    return page.replace('async function importLicense(input) {',
+                        refresh_js + 'async function importLicense(input) {')
 
 
 class PanelHandlers:
@@ -1543,6 +1621,12 @@ def make_handler(handlers: PanelHandlers):
                 from .activation import activate_with_code
                 body = self._read_json_body() or {}
                 self._json(200, activate_with_code(handlers.layout, body.get("code")))
+            elif parsed.path == "/api/control-refresh":
+                from .activation import refresh_control
+                body = self._read_json_body() or {}
+                self._json(200, refresh_control(handlers.layout, body.get("code")))
+            elif parsed.path == "/api/control-status":
+                self._json(200, control_banner(handlers.layout))
             elif parsed.path == "/api/license-import":
                 from .activation import install_document
                 body = self._read_json_body() or {}

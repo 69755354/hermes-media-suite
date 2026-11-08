@@ -77,7 +77,7 @@ def test_activate_with_code_writes_valid_control_atomically(
     result = activation.activate_with_code(layout, "ABCD1234")
 
     assert result["ok"] is True
-    assert "接入已配置" in result["reason"]
+    assert "接入已补齐" in result["reason"]
     assert installed == [response["license"]]
     target = Path(layout.data) / "control.json"
     assert json.loads(target.read_text(encoding="utf-8")) == control
@@ -98,7 +98,7 @@ def test_activate_online_response_writes_control(tmp_path, monkeypatch):
     result = activation.activate(layout)
 
     assert result["ok"] is True
-    assert "接入已配置" in result["reason"]
+    assert "接入已补齐" in result["reason"]
     assert len(installed) == 1
     target = Path(layout.data) / "control.json"
     assert json.loads(target.read_text(encoding="utf-8")) == control
@@ -121,7 +121,7 @@ def test_missing_or_invalid_control_does_not_write_and_still_authorizes(
     result = activation.activate_with_code(layout, "ABCD1234")
 
     assert result["ok"] is True
-    assert "接入已配置" not in result["reason"]
+    assert "接入已补齐" not in result["reason"]
     assert not (Path(layout.data) / "control.json").exists()
 
 
