@@ -1,8 +1,10 @@
 """Customer-visible status of the Feishu/control-plane connection.
 
-The file lives in the worker data root (``<data>/control-status.json``) so the
-panel, the startup chain and support can all answer one question: is this
-machine's control bridge ready?  It never contains a customer/device token.
+The file ALWAYS lives in the shared worker data root
+(``<data>/control-status.json``), never below a historical
+``<data>/customers/<id>`` tenant root.  The poller runs with a tenant root for
+its own state, but both it and the panel must read the same status file.  It
+never contains a customer/device token.
 """
 
 from __future__ import annotations
@@ -13,13 +15,20 @@ import tempfile
 import time
 from pathlib import Path
 
-STATES = ("connected", "missing", "error", "disabled")
+STATES = ("connected", "pending", "missing", "error", "disabled")
 MAX_REASON = 300
 
 
 def _data_dir(layout) -> Path:
-    """Resolve the worker data root from either Layout or CustomerLayout."""
+    """Resolve the SHARED worker data root from Layout or CustomerLayout.
+
+    ``Layout`` exposes ``data``; ``CustomerLayout`` keeps the shared root in
+    ``base`` while its ``root`` is the per-customer tenant.  Preferring ``base``
+    over ``root`` is what keeps the poller and panel on one file.
+    """
     data = getattr(layout, "data", None)
+    if data is None:
+        data = getattr(layout, "base", None)
     if data is None:
         data = getattr(layout, "root", None)
     if data is None:

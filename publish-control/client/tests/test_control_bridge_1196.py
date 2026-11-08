@@ -167,7 +167,8 @@ def test_existing_formal_licence_reprovisions_missing_control(
     target = Path(layout.data) / "control.json"
     assert json.loads(target.read_text(encoding="utf-8"))["customer_id"] == "c_123"
     status = control_status.read_status(layout)
-    assert status["state"] == "connected"
+    assert status["state"] == "pending"
+    assert panel.control_banner(layout)["state"] != "connected"
     assert stat.S_IMODE((Path(layout.data) / "control-status.json").stat().st_mode) == 0o600
 
 

@@ -161,7 +161,7 @@ def test_newer_runtime_failure_overrides_valid_control(
     assert banner["state"] != "connected"
 
 
-def test_older_status_does_not_override_a_new_control_file(tmp_path):
+def test_older_status_keeps_new_control_pending_not_green(tmp_path):
     layout = _layout(tmp_path)
     target = Path(layout.data) / "control.json"
     target.write_text(json.dumps(_control()), encoding="utf-8")
@@ -170,8 +170,9 @@ def test_older_status_does_not_override_a_new_control_file(tmp_path):
 
     banner = panel.control_banner(layout)
 
-    assert banner["state"] == "connected"
-    assert banner["level"] == "ok"
+    assert banner["state"] == "pending"
+    assert banner["level"] == "warn"
+    assert banner["state"] != "connected"
 
 
 def _config(layout):

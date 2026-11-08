@@ -126,7 +126,12 @@ def _has_valid_control(layout) -> bool:
 
 
 def _bridge_control(layout, response):
-    """Persist the control binding and return (ok, reason, state)."""
+    """Persist the control binding and return (ok, reason, state, written).
+
+    A written control.json is only a *saved configuration*.  It is not proof
+    that the control plane accepts the token, so the visible state is
+    ``pending`` until the poller completes its first successful poll.
+    """
     control = response.get('control') if isinstance(response, dict) else None
     control_error = _control_error_text(response)
     if is_valid_control(control):
@@ -135,15 +140,15 @@ def _bridge_control(layout, response):
         except Exception:  # noqa: BLE001 - licence stays valid; report honestly
             reason = '接入配置保存失败，请联系服务商。'
             _set_control_status(layout, 'error', reason, control)
-            return False, reason, 'error'
-        _set_control_status(layout, 'connected', '', control)
-        return True, '接入已补齐', 'connected'
+            return False, reason, 'error', False
+        _set_control_status(layout, 'pending', '', control)
+        return True, '接入已补齐', 'pending', True
     if control_error:
         _set_control_status(layout, 'error', control_error, control)
-        return False, control_error, 'error'
+        return False, control_error, 'error', False
     reason = '服务端未返回接入配置'
     _set_control_status(layout, 'missing', reason, control)
-    return False, reason, 'missing'
+    return False, reason, 'missing', False
 
 
 def _install_with_control(layout, document, response):
@@ -151,20 +156,22 @@ def _install_with_control(layout, document, response):
     result = install_document(layout, document)
     if not result.get('ok'):
         return result
-    control_ok, control_reason, control_state = _bridge_control(layout, response)
+    control_ok, control_reason, control_state, control_written = _bridge_control(
+        layout, response)
     reason = ('授权已生效，接入已补齐' if control_ok else
               '授权已生效，但接入未完成：' + control_reason)
     return {**result, 'reason': reason, 'control_state': control_state,
-            'control_ok': control_ok}
+            'control_ok': control_ok, 'control_written': control_written}
 
 
 def _complete_existing_control(layout, response):
     """An existing formal licence stays installed; only bridge control."""
-    control_ok, control_reason, control_state = _bridge_control(layout, response)
+    control_ok, control_reason, control_state, control_written = _bridge_control(
+        layout, response)
     reason = ('授权已生效，接入已补齐' if control_ok else
               '授权已生效，但接入未完成：' + control_reason)
     return {'ok': True, 'reason': reason, 'control_state': control_state,
-            'control_ok': control_ok}
+            'control_ok': control_ok, 'control_written': control_written}
 
 
 def _existing_incomplete(layout, reason):
@@ -203,12 +210,15 @@ def exchange(token, machine_id):
     return obj
 
 
-def activate_with_code(layout, code):
+def activate_with_code(layout, code, *, force=False):
     """Redeem a short enrolment code typed by the customer.
 
     The code is not a secret that grants blanket access: the server binds it to
     the first machine that redeems it and can revoke it.  One generic package
-    therefore serves every customer.
+    therefore serves every customer.  ``force`` is used by the explicit
+    "re-provision control" button: it must perform one exchange even when a
+    structurally valid control.json is already on disk, because that file may
+    carry a token the provider has rotated or revoked.
     """
     normalized = normalize_code(code)
     if len(normalized) != CODE_LENGTH:
@@ -223,9 +233,10 @@ def activate_with_code(layout, code):
                     return {'ok': False,
                             'reason': '已有授权，但防回放墓碑仍无法写入；'
                                       '请重试或联系服务商。'}
-                if _has_valid_control(layout):
+                if not force and _has_valid_control(layout):
                     return {'ok': True, 'reason': '已有有效授权，无需再次激活',
-                            'control_state': 'connected', 'control_ok': True}
+                            'control_state': 'pending', 'control_ok': True,
+                            'control_written': False}
         response = exchange(normalized, fingerprint()['machine_id'])
         with _LOCK:
             state = unified_license_state(layout)
@@ -310,7 +321,8 @@ def activate(layout):
                                       '请重试或联系服务商。'}
                 if _has_valid_control(layout):
                     return {'ok': True, 'reason': '已有有效授权，无需联网',
-                            'control_state': 'connected', 'control_ok': True}
+                            'control_state': 'pending', 'control_ok': True,
+                            'control_written': False}
             else:
                 bundled = install_root() / 'license' / 'license.json'
                 if bundled.is_file():
@@ -370,31 +382,55 @@ def activate(layout):
     return {'ok': False, 'reason': reason + ' 新增发布保持暂停，已有数据保留。'}
 
 
-def refresh_control(layout, code=None):
+def restart_after_control(result, restart_poller):
+    """Restart the poller after a newly written control.json, honestly.
+
+    A restart failure is reported in the same result the customer sees; it is
+    never treated as success merely because the file was written.
+    """
+    if (not isinstance(result, dict) or restart_poller is None
+            or not result.get('control_written')):
+        return result
+    try:
+        outcome = restart_poller()
+    except Exception as exc:  # noqa: BLE001 - surface the real failure
+        outcome = {'ok': False,
+                   'reason': f'{type(exc).__name__}: {exc}'}
+    if isinstance(outcome, dict):
+        ok = outcome.get('ok') is not False
+        detail = str(outcome.get('reason') or '').strip()
+    else:
+        ok = bool(outcome)
+        detail = ''
+    if ok:
+        result['poller_restarted'] = True
+        return result
+    detail = detail or '未知原因'
+    result['poller_restarted'] = False
+    result['restart_error'] = detail
+    reason = str(result.get('reason') or '').rstrip('。')
+    result['reason'] = (reason + '；但接入服务重启失败：' + detail
+                        + '，请重启程序或联系服务商。')
+    return result
+
+
+def refresh_control(layout, code=None, *, restart_poller=None):
     """Panel button: run one exchange to (re)provision control.json.
 
-    A code is preferred.  Without one, a package that still carries an
-    enrolment token may use the normal activation path; otherwise the customer
-    is told to type the activation code first.
+    This is the customer's explicit recovery path after a token rotate/revoke,
+    so it always forces one exchange.  Without a code the customer is told to
+    type the activation code first; a valid-looking control.json is not enough.
     """
     normalized = normalize_code(code) if code else ''
-    if normalized:
-        return activate_with_code(layout, normalized)
     if code not in (None, ''):
-        return {'ok': False, 'reason': '激活码格式不对，请核对后重试'}
-    config_path = install_root() / 'config' / 'activation.json'
-    if config_path.is_file():
-        return activate(layout)
-    state = unified_license_state(layout)
-    if _formal(state):
-        reason = ('请在激活码框输入服务商提供的 8 位激活码，'
-                  '再点「重新获取接入配置」。')
-        _set_control_status(layout, 'missing', reason)
-        return {'ok': True, 'reason': '授权已生效，但接入未完成：' + reason,
-                'control_state': 'missing', 'control_ok': False}
-    return {'ok': False,
-            'reason': '请先在激活码框输入服务商提供的 8 位激活码，'
-                      '再点「重新获取接入配置」。'}
+        if not normalized:
+            return {'ok': False, 'reason': '激活码格式不对，请核对后重试'}
+    if not normalized:
+        return {'ok': False,
+                'reason': '请先在激活码框输入服务商提供的 8 位激活码，'
+                          '再点「重新获取接入配置」。'}
+    result = activate_with_code(layout, normalized, force=True)
+    return restart_after_control(result, restart_poller)
 
 
 def main():

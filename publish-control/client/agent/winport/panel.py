@@ -423,11 +423,12 @@ def control_banner(layout) -> dict:
     """The customer-visible Feishu/control bridge status.
 
     The on-disk control.json proves that provisioning produced a binding, but
-    it does not prove that the control plane accepts it right now.  A newer
-    runtime ``error``/``disabled`` status (written by the poller after an
-    authentication or network failure) must therefore win over a valid file.
-    A deleted/corrupt control.json still never shows green merely because an
-    old status line said "connected".
+    it does not prove that the control plane accepts it right now.  Green is
+    reserved for a ``connected`` status written by a real poll *after* this
+    control.json was saved.  A newer runtime ``error``/``disabled`` status wins;
+    otherwise a valid-but-unverified file shows ``pending`` ("连接中…"), never
+    green.  A deleted/corrupt control.json still never shows green merely
+    because an old status line said "connected".
     """
     from .activation import is_valid_control
     from .control_status import read_status
@@ -458,23 +459,32 @@ def control_banner(layout) -> dict:
         updated = float(updated) if updated is not None else None
     except (TypeError, ValueError):
         updated = None
-    if (valid_control and state in ("error", "disabled")
-            and updated is not None and valid_mtime is not None
-            and updated >= valid_mtime):
-        if state == "error":
-            level = "bad"
-            reason = reason or "接入配置失败"
-        else:
-            level = "warn"
-            reason = reason or "接入服务未启动"
-        return {"state": state, "level": level, "reason": reason,
-                "text": "飞书接入：未连接（%s）" % reason}
+    fresh = (updated is not None and valid_mtime is not None
+             and updated >= valid_mtime)
     if valid_control:
-        return {"state": "connected", "level": "ok", "reason": "",
-                "text": "飞书接入：已连接"}
+        # A saved binding is not a verified connection.  Only a status written
+        # after this exact control.json by a real successful poll may be green.
+        if state == "connected" and fresh:
+            return {"state": "connected", "level": "ok", "reason": "",
+                    "text": "飞书接入：已连接"}
+        if state in ("error", "disabled", "missing") and fresh:
+            if state == "error":
+                level = "bad"
+                reason = reason or "接入配置失败"
+            else:
+                level = "warn"
+                reason = reason or ("接入配置缺失" if state == "missing"
+                                    else "接入服务未启动")
+            return {"state": state, "level": level, "reason": reason,
+                    "text": "飞书接入：未连接（%s）" % reason}
+        return {"state": "pending", "level": "warn", "reason": "",
+                "text": "飞书接入：连接中…"}
     if state == "connected":
         state, reason = "missing", "接入配置文件缺失，请点「重新获取接入配置」"
-    if state == "missing":
+    if state == "pending":
+        level = "warn"
+        reason = reason or "等待接入服务首次连接"
+    elif state == "missing":
         reason = reason or "尚未获取接入配置，请用激活码激活或点「重新获取接入配置」"
         level = "warn"
     elif state == "error":
@@ -1372,7 +1382,7 @@ class PanelHandlers:
 
     def __init__(self, layout, channels, *, envs=None, opener=None, checker=None,
                  env_opener=None, tcp=None, processes=None, chrome_report=None,
-                 instance_token=None, remote_channel=None):
+                 instance_token=None, remote_channel=None, restart_poller=None):
         self.layout = layout
         self.channels = channels
         self.envs = envs or []
@@ -1387,6 +1397,7 @@ class PanelHandlers:
         # instance (see main._run_agent / scripts/launcher.vbs PanelAnswers).
         self.instance_token = instance_token or None
         self.remote_channel = remote_channel
+        self.restart_poller = restart_poller
 
     def channel(self, channel_id):
         for channel in self.channels:
@@ -1418,6 +1429,21 @@ class PanelHandlers:
         return build_state(self.layout, self.channels, envs=self.envs, tcp=self.tcp,
                            processes=self.processes,
                            chrome_report=self.chrome_report)
+
+    def activate(self):
+        from .activation import activate as _activate, restart_after_control
+        return restart_after_control(_activate(self.layout), self.restart_poller)
+
+    def activate_with_code(self, code):
+        from .activation import (activate_with_code as _activate_with_code,
+                                 restart_after_control)
+        return restart_after_control(
+            _activate_with_code(self.layout, code), self.restart_poller)
+
+    def control_refresh(self, code=None):
+        from .activation import refresh_control
+        return refresh_control(self.layout, code,
+                               restart_poller=self.restart_poller)
 
     def open(self, channel_id):
         channel = self.channel(channel_id)
@@ -1667,16 +1693,13 @@ def make_handler(handlers: PanelHandlers):
                 from .fingerprint import fingerprint
                 self._json(200, {"machine_id": fingerprint()["machine_id"]})
             elif parsed.path == "/api/activate":
-                from .activation import activate
-                self._json(200, activate(handlers.layout))
+                self._json(200, handlers.activate())
             elif parsed.path == "/api/activate-code":
-                from .activation import activate_with_code
                 body = self._read_json_body() or {}
-                self._json(200, activate_with_code(handlers.layout, body.get("code")))
+                self._json(200, handlers.activate_with_code(body.get("code")))
             elif parsed.path == "/api/control-refresh":
-                from .activation import refresh_control
                 body = self._read_json_body() or {}
-                self._json(200, refresh_control(handlers.layout, body.get("code")))
+                self._json(200, handlers.control_refresh(body.get("code")))
             elif parsed.path == "/api/control-status":
                 self._json(200, control_banner(handlers.layout))
             elif parsed.path == "/api/license-import":
@@ -1770,13 +1793,14 @@ def make_handler(handlers: PanelHandlers):
 def make_server(layout, channels, *, host="127.0.0.1", port=None, envs=None,
                 opener=None, checker=None, env_opener=None, tcp=None,
                 processes=None, chrome_report=None, instance_token=None,
-                remote_channel=None):
+                remote_channel=None, restart_poller=None):
     port = int(port or DEFAULT_PANEL_PORT)
     handlers = PanelHandlers(layout, channels, envs=envs, opener=opener,
                              checker=checker, env_opener=env_opener, tcp=tcp,
                              processes=processes, chrome_report=chrome_report,
                              instance_token=instance_token,
-                             remote_channel=remote_channel)
+                             remote_channel=remote_channel,
+                             restart_poller=restart_poller)
     server = ThreadingHTTPServer((host, port), make_handler(handlers))
     server.daemon_threads = True
     return server, handlers

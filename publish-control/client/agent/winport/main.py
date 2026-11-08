@@ -29,6 +29,7 @@ from .version import APP_NAME_DISPLAY, VERSION
 
 CONTROL_RECHECK_INTERVAL = 30.0
 CONTROL_RECHECK_MAX_SECONDS = 24 * 60 * 60
+_AGENTPOLL_RESTART_LOCK = threading.RLock()
 
 #: Stable artifacts that only ever exist below a historical per-customer root.
 #: They must not include ``<data>/inbox``: startup calls ``Layout.ensure()``
@@ -216,7 +217,7 @@ def _single_root_for(layout, customer_id) -> bool:
     return True
 
 
-def _start_agentpoll(layout, logger):
+def _start_agentpoll(layout, logger, *, start_remote=True):
     """Start the control-plane poller as part of the normal startup chain.
 
     The poller is disabled when no CUSTOMER_TOKEN is configured (the legacy
@@ -232,7 +233,7 @@ def _start_agentpoll(layout, logger):
         logger.error("agentpoll unavailable: %s", exc)
         _write_agentpoll_marker(layout, logger, state="import_error",
                                 last_error=f"{type(exc).__name__}: {exc}")
-        _write_control_status(layout, logger, "disabled",
+        _write_control_status(layout, logger, "error",
                               f"接入组件不可用：{type(exc).__name__}: {exc}")
         return None
     overlay = {}
@@ -284,7 +285,7 @@ def _start_agentpoll(layout, logger):
         logger.error("agentpoll config failed: %s", exc)
         _write_agentpoll_marker(layout, logger, state="config_error",
                                 last_error=f"{type(exc).__name__}: {exc}")
-        _write_control_status(layout, logger, "disabled",
+        _write_control_status(layout, logger, "error",
                               f"接入配置错误：{type(exc).__name__}: {exc}",
                               customer_id=customer_id)
         return None
@@ -304,7 +305,7 @@ def _start_agentpoll(layout, logger):
         logger.error("agentpoll startup failed: %s", exc)
         write_status(config, state="startup_error",
                      last_error=f"{type(exc).__name__}: {exc}")
-        _write_control_status(layout, logger, "disabled",
+        _write_control_status(layout, logger, "error",
                               f"接入服务启动失败：{type(exc).__name__}: {exc}",
                               customer_id=config.customer_id,
                               device_id=config.device_id)
@@ -315,12 +316,59 @@ def _start_agentpoll(layout, logger):
     # control.json is valid.  The poller itself writes that status after its
     # first successful poll (and writes error/disabled when the control plane
     # rejects the credentials or cannot be reached).
-    try:
-        from .remote_agent import start_remote_agent
-        start_remote_agent(config, logger=logger)
-    except Exception as exc:  # noqa: BLE001 - panel keeps working
-        logger.warning("remote agent unavailable: %s", exc)
+    if start_remote:
+        try:
+            from .remote_agent import start_remote_agent
+            start_remote_agent(config, logger=logger)
+        except Exception as exc:  # noqa: BLE001 - panel keeps working
+            logger.warning("remote agent unavailable: %s", exc)
     return poller
+
+
+def _restart_agentpoll(layout, logger, poller_slot, start_poller=None):
+    """Stop the active poller, then start a fresh one from control.json.
+
+    The panel calls this after a successful re-provision.  The old poller keeps
+    the old token in memory, so a file write alone cannot make the new token
+    take effect.  Every failure is returned and written as a visible error.
+    """
+    def _default_start(layout_arg, logger_arg):
+        return _start_agentpoll(layout_arg, logger_arg, start_remote=False)
+
+    with _AGENTPOLL_RESTART_LOCK:
+        old = poller_slot.get("poller")
+        if start_poller is None:
+            # Keep an existing remote-agent thread instead of starting a
+            # duplicate; when no poller existed yet, this is the first start.
+            start_poller = (_default_start if old is not None
+                            else _start_agentpoll)
+        poller_slot["poller"] = None
+        if old is not None:
+            try:
+                old.stop()
+            except Exception as exc:  # noqa: BLE001 - report, never silent
+                poller_slot["poller"] = old
+                reason = f"停止旧接入服务失败：{type(exc).__name__}: {exc}"
+                _write_control_status(layout, logger, "error", reason)
+                return {"ok": False, "reason": reason}
+            thread = getattr(old, "thread", None)
+            if (thread is not None and thread.is_alive()
+                    and thread is not threading.current_thread()):
+                try:
+                    thread.join(5.0)
+                except Exception:  # noqa: BLE001 - restart must still proceed
+                    pass
+        new_poller = start_poller(layout, logger)
+        if new_poller is None:
+            marker = _agentpoll_marker(layout)
+            detail = str(marker.get("reason") or marker.get("last_error")
+                         or marker.get("state") or "未返回可用接入服务")
+            reason = f"接入服务未能重新启动：{detail}"
+            _write_control_status(layout, logger, "error", reason)
+            return {"ok": False, "reason": reason}
+        poller_slot["poller"] = new_poller
+    logger.info("agentpoll restarted with the current control.json token")
+    return {"ok": True, "reason": "接入服务已重启"}
 
 
 def _agentpoll_marker(layout):
@@ -374,20 +422,25 @@ def _control_recheck_once(layout, logger, poller_slot, stop_event=None):
     candidate, _data = found
     logger.info("control.json ready at %s; retrying agentpoll startup",
                 candidate)
-    poller = _start_agentpoll(layout, logger)
-    if poller is not None:
-        if stop_event is not None and stop_event.is_set():
-            poller.stop()
-            return "stopped"
-        poller_slot["poller"] = poller
-        return "started"
-    marker = _agentpoll_marker(layout)
-    state = str(marker.get("state") or "")
-    detail = str(marker.get("last_error") or marker.get("reason") or "")
-    if _is_auth_failure(state, detail):
-        logger.error("agentpoll retry stopped after explicit auth failure: %s",
-                     detail or state)
-        return "auth_failed"
+    with _AGENTPOLL_RESTART_LOCK:
+        # A panel-triggered restart may have already installed a poller with
+        # the new token.  Never create a second one from the recheck thread.
+        if poller_slot.get("poller") is not None:
+            return "started"
+        poller = _start_agentpoll(layout, logger)
+        if poller is not None:
+            if stop_event is not None and stop_event.is_set():
+                poller.stop()
+                return "stopped"
+            poller_slot["poller"] = poller
+            return "started"
+        marker = _agentpoll_marker(layout)
+        state = str(marker.get("state") or "")
+        detail = str(marker.get("last_error") or marker.get("reason") or "")
+        if _is_auth_failure(state, detail):
+            logger.error("agentpoll retry stopped after explicit auth failure: %s",
+                         detail or state)
+            return "auth_failed"
     logger.info("agentpoll retry will continue: %s", detail or state or "unknown")
     return "retry"
 
@@ -508,11 +561,15 @@ def _run_agent(layout, logger, args) -> int:
     def _stop_agentpoll():
         nonlocal agentpoll
         control_recheck_stop.set()
-        poller = agentpoll_slot.get("poller")
-        agentpoll_slot["poller"] = None
-        if poller is not None:
-            poller.stop()
+        with _AGENTPOLL_RESTART_LOCK:
+            poller = agentpoll_slot.get("poller")
+            agentpoll_slot["poller"] = None
+            if poller is not None:
+                poller.stop()
         agentpoll = None
+
+    def _restart_for_panel():
+        return _restart_agentpoll(layout, logger, agentpoll_slot)
 
     # Local control panel: the customer's "status lights" screen + login entry.
     # Loopback only.  1.2.5 (GPT review item 8): if it cannot bind we do NOT
@@ -555,7 +612,8 @@ def _run_agent(layout, logger, args) -> int:
         info = serve_in_thread(layout, channels, envs=environments,
                                host=binding["host"], port=binding["port"],
                                instance_token=instance_token,
-                               remote_channel=remote)
+                               remote_channel=remote,
+                               restart_poller=_restart_for_panel)
         panel_url = info["url"]
         logger.info("control panel: %s", panel_url)
     except Exception as exc:
