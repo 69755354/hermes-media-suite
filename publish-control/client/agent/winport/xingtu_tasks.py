@@ -1682,6 +1682,18 @@ def match_picker_rows(rows, task):
                 "candidates": [candidate(row, usable=False) for row in matches[:8]],
                 "reason": "only_unavailable", "resolved_identity": None}
 
+    # 发布页有时把同一条任务列两遍（同名、都没订单号）。这种情况不是
+    # 真歧义：合并成一条取第一个，否则客户会被永远卡在"同名多条"。
+    if len(usable) > 1:
+        _distinct, _seen = [], set()
+        for _row in usable:
+            _key = (tuple(titles(_row)), tuple(unique_order_ids(_row)))
+            if _key in _seen:
+                continue
+            _seen.add(_key)
+            _distinct.append(_row)
+        usable = _distinct
+
     multi_order = [row for row in usable if len(unique_order_ids(row)) > 1]
     if multi_order or len(usable) > 1:
         return {"status": RESOLVE_AMBIGUOUS, "rows": [], "matches": usable,
