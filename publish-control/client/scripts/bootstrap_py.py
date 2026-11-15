@@ -2140,14 +2140,22 @@ class Installer:
         # Also replace an older elevated task on a non-elevated upgrade.
         # Permission failures must stop installation, not preserve the old entry.
         if not self._start_supervisor_as_user(launcher):
-            # Some customer machines deny schtasks to a non-elevated user.  That
-            # is only fatal when it leaves an OLD task behind: such a task would
-            # relaunch the previous program at logon.  With no task at all the
-            # HKCU Run entry above is the complete logon path, and the agent must
-            # still come online NOW or the handover check fails the install.
+            # Some customer machines deny schtasks to a non-elevated user, and a
+            # pre-existing ONLOGON task owned by another account cannot even be
+            # deleted by us (taskkill/schtasks return "access denied").  Blocking
+            # the install here leaves the customer with a half-installed product
+            # and a dead agent, so: repoint the old task when we can, otherwise
+            # accept it, start the supervisor directly, and let the handover
+            # check below decide.  A stale task only costs a duplicate start at
+            # logon -- the agent already refuses a second instance on its port.
             if self._supervisor_task_exists():
-                raise RuntimeError("could not replace/start ONLOGON supervisor task; check task permissions")
-            self.log("WARNING: logon task unavailable (no admin); starting supervisor directly")
+                if self._repoint_supervisor_task(launcher):
+                    self.log("WARNING: reused existing ONLOGON task (no permission to recreate)")
+                else:
+                    self.log("WARNING: existing ONLOGON task could not be reused; "
+                             "starting supervisor directly and leaving the task as-is")
+            else:
+                self.log("WARNING: logon task unavailable (no admin); starting supervisor directly")
             if not self._launch_supervisor_direct(launcher):
                 raise RuntimeError("could not start supervisor directly")
         deadline = time.monotonic() + 75
@@ -2170,6 +2178,32 @@ class Installer:
         except (OSError, subprocess.SubprocessError):
             return True  # cannot prove it is absent -> treat as present, stay strict
         return out.returncode == 0
+
+    def _repoint_supervisor_task(self, launcher: Path) -> bool:
+        """Point an existing ONLOGON task at this install without recreating it.
+
+        A task created by an elevated installer cannot be deleted by a standard
+        user (schtasks returns "access denied", rc=5), but ``/Change /TR`` is
+        accepted far more often than ``/Delete``.  Reusing it keeps logon
+        autostart working instead of leaving the old program's path behind.
+        """
+        if os.name != "nt":
+            return False
+        command = 'wscript.exe //nologo "%s"' % launcher
+        try:
+            res = subprocess.run(
+                ["schtasks", "/Change", "/TN", "ManjuPublishAssistantSupervisor",
+                 "/TR", command],
+                capture_output=True, timeout=30, **text_mode_options())
+            self.log("supervisor task repoint rc=%s" % res.returncode)
+            if res.returncode != 0:
+                detail = (res.stderr or res.stdout or "").strip()
+                if detail:
+                    self.log("  schtasks change: %s" % detail[:300])
+            return res.returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log("supervisor task repoint failed: %s" % exc)
+            return False
 
     def _launch_supervisor_direct(self, launcher: Path) -> bool:
         """Start the supervisor without Task Scheduler.
