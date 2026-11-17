@@ -1,0 +1,114 @@
+# Release gate for hermes-media-suite (added 1.2.219).
+#
+# Every PR / push to main runs the whole publish-control suite in ONE pytest
+# session from the repo root (no cwd assumptions), the client static gates,
+# the e2e self-verify as a non-root user, the repo gate chain, and the OTA
+# completeness gate: a patch is built from git for tools/ota_policy.json's
+# min_version and every release point >= it must import and start after the
+# patch is overlaid.  Pushing a v* tag additionally requires the tag to be on
+# main and to match client/VERSION (tools/release_guard.py).
+#
+# Make "linux" a required status check on main (Settings -> Branches) so a
+# red run blocks the merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # OTA gate and release guard read history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: .github/ci-requirements.txt
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r .github/ci-requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Tests (publish-control/tests + client/tests, one session)
+        run: python -m pytest -q -p no:cacheprovider publish-control/tests publish-control/client/tests
+      - name: Same suite, reversed order (catches test-to-test leakage)
+        run: python -m pytest -q -p no:cacheprovider publish-control/client/tests publish-control/tests
+      - name: Client static gates
+        working-directory: publish-control/client
+        run: |
+          python tools/static_verify.py
+          python tools/scan_forbidden_patterns.py
+          python tools/check_encodings.py --root .
+      - name: Repo gate chain
+        run: python scripts/test_gate_chain.py
+      - name: e2e self-verify (non-root runner user)
+        working-directory: publish-control/client
+        run: |
+          python tools/e2e_selfverify.py --out "$RUNNER_TEMP/SELF_VERIFY_REPORT.md"
+      - name: OTA completeness gate (build from git, simulate every release point)
+        working-directory: publish-control/client
+        run: python tools/ota_patch.py gate --simulate
+      - name: Release guard (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: publish-control/client
+        run: |
+          git fetch origin main
+          python tools/release_guard.py --tag "${GITHUB_REF_NAME}" --main origin/main
+      - name: Upload e2e report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-py${{ matrix.python }}
+          path: ${{ runner.temp }}/SELF_VERIFY_REPORT.md
+          if-no-files-found: ignore
+
+  windows:
+    # Customers run Windows.  Informational until the suite has been green on a
+    # Windows runner once; then drop continue-on-error and make it required.
+    name: windows (py3.11, informational)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .github/ci-requirements.txt
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r .github/ci-requirements.txt
+          python -m playwright install chromium
+      - name: Tests (one session)
+        run: python -m pytest -q -p no:cacheprovider publish-control/tests publish-control/client/tests
+      - name: Client static gates
+        working-directory: publish-control/client
+        run: |
+          python tools/static_verify.py
+          python tools/check_encodings.py --root .
