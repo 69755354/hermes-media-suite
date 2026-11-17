@@ -98,3 +98,22 @@
 - **星图列表未回就抢答序号会绑错任务（2026-11-03 实测）**：`_mt_start_xingtu_menu` 异步拉任务（约 70s），期间 `status=awaiting_xingtu_task` 且 `auto_xingtu_tasks=[]`；客户若先回「1」，`_mt_pick_xingtu_task` 走「无列表就接受客户输入的名字」分支，把「1」当任务名。修法：任务列表为空且在拉取中时回「还在拉取，稍等」，不要把纯数字当任务名。
 - **prepare 命令会把未发布素材标成 published（2026-11-03 实测，控制面缺陷）**：`server.py` 在命令 status=done 时无条件 `UPDATE device_material_claims SET status='published'`，op=create（prepare）同样命中。库内已有 4 条此类误标（含测试产生的一条，已回滚为 released，证据 fix_evidence_test_cleanup_20261103.json）。修法：只有 op=confirm 且回执 published=true 才标 published。
 - **2026-11-03 已修上述两条**：①`server.py` 新增 `_published_evidence()`，只有 `payload.op=confirm` 且有 published=true / platform_work_id 才把素材标 published；用隔离库做 record_result 集成测试：prepare→claimed、真发布→published、confirm 无证据→claimed，三条全过。②`bot.py` 星图拉取期间（`xingtu_fetch_started_at` 起 300 秒内、列表仍空）收到纯数字回「还在拉取，稍等」，不再把数字当任务名；离线用例通过。两个服务已重启（publish-control 16:28:29 / feishu-publish-bot 16:28:34），备份 server.py.bak_20261103_claims、bot.py.bak_20261103_xingtu_wait。历史另有 3 条 create 命令留下的 published 记录未动（无法判定是否早前真发过，且不影响单机发布）。
+
+## 增量包出包强制检查（2026-11-17 定，物理检查）
+
+**出任何 `patch-1.2.NNN.zip` 之前必须跑，RESULT: PASS 才允许发布：**
+
+```bash
+cd /home/ubuntu/build/hermes-media-suite/publish-control/client
+python3 tools/patch_coverage_check.py --to-tag v1.2.NNN \
+    --patch-zip /home/ubuntu/workflow/projects/publish_control/updates/patch-1.2.NNN.zip \
+    --manifest /home/ubuntu/workflow/projects/publish_control/updates/manifest-1.2.NNN.json
+```
+
+规则两条：
+1. `min_version` 到目标版本之间**每个版本**改过的程序文件必须全部在补丁里。程序文件 = `agent/`、`config/`、`scripts/` 下全部 + 客户端根目录的 `*.py`/`*.bat`（`run_panel.py`、`bootstrap.bat` 这类）；不含 `tests/`、`tools/`、`VERSION`、`MANIFEST.json`、`SHA256SUMS.txt`。
+2. `min_version` 必须等于**第一个被完整覆盖的版本**——不是随手填的旧版本号，也不是「大部分文件在就够」。
+
+**背景（1.2.218 事故）**：清单写 `min_version=1.2.188`，补丁只从 1.2.192 起完整。1.2.188–1.2.191 客户 OTA 后 `python -m winport` 报 `ModuleNotFoundError: winport.process_identity`，updater 健康检查失败回滚，形成「升级→起不来→回滚」死循环；1.2.193 另缺 `process_identity.py`/`updater.py`，根目录 `run_panel.py` 也漏打。修法：把 1.2.188→1.2.218 之间改过的全部程序文件打进补丁（23 → 34 个文件），重签清单，`min_version` 保持 1.2.188 且每个版本均 0 缺失。
+
+**发布顺序**：先替换 `patch-1.2.NNN.zip`，再替换 `manifest-1.2.NNN.json` 并覆盖 `manifest.json`（服务器每次请求现读，不用重启）；旧包旧清单先 `cp` 到 `updates/backups/superseded_<ver>_<ts>/`。发布后从广州机 `curl -sk https://xingturgzn.cn/ctl/update/manifest.json` 核对 version / min_version / files 数量 / patch_zip_sha256，并下载 zip 核 sha256 与大小。
