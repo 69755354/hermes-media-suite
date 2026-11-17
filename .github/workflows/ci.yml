@@ -50,6 +50,12 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install -r .github/ci-requirements.txt
+          # playwright 1.47.0 provisions greenlet==3.0.3, which has no wheel for
+          # py3.13 and does not compile there; install it WITHOUT that pin and
+          # choose greenlet per Python version.  The API playwright uses is the
+          # same in 3.1.1 (verified: full suite + e2e pass on py3.13).
+          python -m pip install --no-deps playwright==1.47.0
+          python -m pip install "greenlet==3.0.3; python_version < '3.13'" "greenlet==3.1.1; python_version >= '3.13'"
           python -m playwright install --with-deps chromium
       - name: Tests (publish-control/tests + client/tests, one session)
         run: python -m pytest -q -p no:cacheprovider publish-control/tests publish-control/client/tests
@@ -104,6 +110,8 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install -r .github/ci-requirements.txt
+          python -m pip install --no-deps playwright==1.47.0
+          python -m pip install "greenlet==3.0.3; python_version < '3.13'" "greenlet==3.1.1; python_version >= '3.13'"
           python -m playwright install chromium
       - name: Tests (one session)
         run: python -m pytest -q -p no:cacheprovider publish-control/tests publish-control/client/tests
