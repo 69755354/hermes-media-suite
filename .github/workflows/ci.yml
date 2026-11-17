@@ -29,7 +29,11 @@ concurrency:
 jobs:
   linux:
     name: linux (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # Pinned on purpose: ubuntu-latest rolled to 26.04 on 2026-11-17 and
+    # `playwright install --with-deps chromium` then fails (fonts-unifont,
+    # xfonts-*, fonts-wqy-zenhei have no candidate in 26.04), which red-lines
+    # the job in the dependency step, not in the tests.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
