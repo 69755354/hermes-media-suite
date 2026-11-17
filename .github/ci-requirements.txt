@@ -1,0 +1,11 @@
+# Test/CI dependencies (not shipped to customers).  Runtime deps live in
+# publish-control/client/requirements.txt; playwright is pinned to the same
+# version the client ships so the Chromium tests drive the same protocol.
+pytest==8.3.3
+pyee==12.0.0
+# playwright is installed separately in ci.yml: 1.47.0 hard-pins greenlet==3.0.3,
+# which has no cp313 wheel and does not compile on Python 3.13, so greenlet is
+# picked per Python version there (3.0.3 on <=3.12, 3.1.1 on 3.13).
+openpyxl==3.1.5
+pyyaml==6.0.2
+requests==2.32.3

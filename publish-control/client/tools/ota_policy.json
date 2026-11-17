@@ -1,0 +1,4 @@
+{
+  "min_version": "1.2.192",
+  "_why": "Oldest version the OTA patch must fully cover. 1.2.188-1.2.191 need the full installer (patch would lack process_identity.py etc.). Raise it when old installs are retired; CI (ota_patch.py gate) proves every release point >= this version starts after the patch."
+}
