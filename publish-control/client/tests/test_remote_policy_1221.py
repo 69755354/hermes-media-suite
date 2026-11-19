@@ -57,6 +57,17 @@ class AssistStateTests(_Base):
         self.assertTrue(remote_policy.assist_state(self.layout, now=now + 10)["active"])
         self.assertFalse(remote_policy.assist_state(self.layout, now=now + 3601)["active"])
 
+    def test_no_timer_stays_on_until_switched_off(self):
+        now = time.time()
+        state = remote_policy.set_assist(self.layout, True, hours=None, now=now)
+        self.assertTrue(state["active"])
+        self.assertTrue(state["no_expiry"])
+        self.assertEqual(state["remaining_s"], -1)
+        far = now + 10 * 365 * 86400
+        self.assertTrue(remote_policy.assist_state(self.layout, now=far)["active"])
+        remote_policy.set_assist(self.layout, False, now=far)
+        self.assertFalse(remote_policy.assist_state(self.layout, now=far)["active"])
+
     def test_hours_bounds_and_types(self):
         for bad in (0, 25, "x", -1):
             with self.assertRaises(ValueError):
