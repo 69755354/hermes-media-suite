@@ -78,7 +78,19 @@ class RemoteAssistRequired(PermissionError):
 
 # --------------------------------------------------------------------- consent
 def _settings_path(layout):
-    return Path(layout.settings_file)
+    """Where the customer's consent is stored: per machine, not per tenant.
+
+    The panel writes the switch through the base layout
+    (``<data>/config/settings.json``) while the poller runs with a
+    customer-scoped one (``<data>/customers/<id>/config/settings.json``).
+    Reading only the scoped copy made the panel's switch invisible to the
+    gate, so operator work stayed blocked however often it was turned on.
+    """
+    path = Path(layout.settings_file)
+    tenant_root = path.parent.parent
+    if tenant_root.parent.name.lower() == "customers":
+        return tenant_root.parent.parent / "config" / "settings.json"
+    return path
 
 
 def _read_settings(layout):
@@ -116,7 +128,7 @@ def set_assist(layout, enabled, hours=DEFAULT_ASSIST_HOURS, now=None, actor="pan
     now = time.time() if now is None else float(now)
     if type(enabled) is not bool:
         raise ValueError("enabled must be boolean")
-    settings = load_settings(layout.settings_file)
+    settings = load_settings(_settings_path(layout))
     if enabled:
         try:
             hours = float(hours)
@@ -128,7 +140,7 @@ def set_assist(layout, enabled, hours=DEFAULT_ASSIST_HOURS, now=None, actor="pan
                                 "since": now}
     else:
         settings[ASSIST_KEY] = {"enabled": False}
-    write_json(layout.settings_file, settings)
+    write_json(_settings_path(layout), settings)
     state = assist_state(layout, now=now)
     audit(layout, "consent", "assist-on" if enabled else "assist-off", True,
           {"actor": actor, "until": state.get("until")})
