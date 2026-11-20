@@ -161,12 +161,24 @@ def execute(op, body=None, config=None):
 
 def _policy_layout(config):
     """The machine's layout for policy checks.  Fails closed: without a
-    config the default layout (and therefore the default policy) applies."""
+    config the default layout (and therefore the default policy) applies.
+
+    1.2.223: agentpoll hands us a ``customer_paths.CustomerLayout`` (it has
+    ``root``/``base``, no ``data``/``program``).  remote_policy and named_ops
+    need the worker layout, so convert it explicitly -- passing the poller
+    layout straight through raised ``AttributeError: 'CustomerLayout' object
+    has no attribute 'data'`` and broke read/ls/write plus every data-backed
+    named op on the control plane.
+    """
     layout = getattr(config, "layout", None) if config is not None else None
-    if layout is None:
-        from .paths import Layout
-        layout = Layout()
-    return layout
+    if layout is not None and getattr(layout, "data", None) is not None \
+            and getattr(layout, "program", None) is not None:
+        return layout
+    from .paths import Layout
+    data = None
+    if layout is not None:
+        data = getattr(layout, "root", None) or getattr(layout, "base", None)
+    return Layout(data=data) if data else Layout()
 
 
 def _loop(config, logger):
