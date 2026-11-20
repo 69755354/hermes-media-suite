@@ -87,10 +87,12 @@ def cmd_named_op(args):
 
 def cmd_remote_assist(args):
     """Customer-side switch for remote assist (never callable remotely)."""
-    from .remote_policy import DEFAULT_ASSIST_HOURS, assist_state, set_assist
+
+    from .remote_policy import assist_state, set_assist
     layout = _layout(args)
     if args.action == "on":
-        state = set_assist(layout, True, hours=args.hours or DEFAULT_ASSIST_HOURS, actor="cli")
+        # 1.2.225: no --hours means on until the customer switches it off
+        state = set_assist(layout, True, hours=args.hours, actor="cli")
     elif args.action == "off":
         state = set_assist(layout, False, actor="cli")
     else:

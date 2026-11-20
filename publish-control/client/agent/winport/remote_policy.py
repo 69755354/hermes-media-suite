@@ -15,8 +15,9 @@ Default ("business mode", always on):
     the working directory is forced to the program directory.
   * read / ls of regular files inside the data area or the program directory.
 
-Remote assist (customer turns it on in the panel; expires on its own,
-default 4 h, max 24 h):
+Remote assist (customer turns it on in the panel; 1.2.225: stays on until the
+customer switches it off again -- no automatic expiry.  A caller may still ask
+for a bounded window of 1..24 h, in which case it expires on its own):
   * anything else: arbitrary argv / ``python -c`` / cmd / powershell, writes,
     files outside those two roots, desktop screenshots.
 
@@ -79,7 +80,19 @@ class RemoteAssistRequired(PermissionError):
 
 # --------------------------------------------------------------------- consent
 def _settings_path(layout):
-    return Path(layout.settings_file)
+    """Where the customer's consent is stored: per machine, not per tenant.
+
+    The panel writes the switch through the base layout
+    (``<data>/config/settings.json``) while the poller runs with a
+    customer-scoped one (``<data>/customers/<id>/config/settings.json``).
+    Reading only the scoped copy made the panel's switch invisible to the
+    gate, so operator work stayed blocked however often it was turned on.
+    """
+    path = Path(layout.settings_file)
+    tenant_root = path.parent.parent
+    if tenant_root.parent.name.lower() == "customers":
+        return tenant_root.parent.parent / "config" / "settings.json"
+    return path
 
 
 def _read_settings(layout):
@@ -94,19 +107,25 @@ def assist_state(layout, now=None) -> dict:
     """``{"active": bool, "until": epoch|None, "remaining_s": int}``.
 
     Absent, malformed, disabled or expired -> inactive.  There is no "always
-    on" value: an ``until`` beyond MAX_ASSIST_HOURS from now is clamped."""
+    on": an explicit ``until: null`` means no window -- active until the
+    customer switches it off (``remaining_s`` is then -1).  A numeric ``until``
+    beyond MAX_ASSIST_HOURS from now is still clamped, so a hand-edited file
+    cannot grant access forever."""
     now = time.time() if now is None else float(now)
     raw = _read_settings(layout).get(ASSIST_KEY)
     if not isinstance(raw, dict) or raw.get("enabled") is not True:
-        return {"active": False, "until": None, "remaining_s": 0}
+        return {"active": False, "until": None, "remaining_s": 0, "no_expiry": False}
+    if "until" in raw and raw.get("until") is None:
+        return {"active": True, "until": None, "remaining_s": -1, "no_expiry": True}
     try:
         until = float(raw.get("until"))
     except (TypeError, ValueError):
-        return {"active": False, "until": None, "remaining_s": 0}
+        return {"active": False, "until": None, "remaining_s": 0, "no_expiry": False}
     until = min(until, now + MAX_ASSIST_HOURS * 3600)
     if until <= now:
-        return {"active": False, "until": until, "remaining_s": 0}
-    return {"active": True, "until": until, "remaining_s": int(until - now)}
+        return {"active": False, "until": until, "remaining_s": 0, "no_expiry": False}
+    return {"active": True, "until": until, "remaining_s": int(until - now),
+            "no_expiry": False}
 
 
 def set_assist(layout, enabled, hours=DEFAULT_ASSIST_HOURS, now=None, actor="panel"):
@@ -117,19 +136,22 @@ def set_assist(layout, enabled, hours=DEFAULT_ASSIST_HOURS, now=None, actor="pan
     now = time.time() if now is None else float(now)
     if type(enabled) is not bool:
         raise ValueError("enabled must be boolean")
-    settings = load_settings(layout.settings_file)
+    settings = load_settings(_settings_path(layout))
     if enabled:
-        try:
-            hours = float(hours)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("hours must be a number") from exc
-        if not 0 < hours <= MAX_ASSIST_HOURS:
-            raise ValueError("hours must be within 1..%d" % MAX_ASSIST_HOURS)
-        settings[ASSIST_KEY] = {"enabled": True, "until": now + hours * 3600,
-                                "since": now}
+        if hours is None:
+            settings[ASSIST_KEY] = {"enabled": True, "until": None, "since": now}
+        else:
+            try:
+                hours = float(hours)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("hours must be a number") from exc
+            if not 0 < hours <= MAX_ASSIST_HOURS:
+                raise ValueError("hours must be within 1..%d" % MAX_ASSIST_HOURS)
+            settings[ASSIST_KEY] = {"enabled": True, "until": now + hours * 3600,
+                                    "since": now}
     else:
         settings[ASSIST_KEY] = {"enabled": False}
-    write_json(layout.settings_file, settings)
+    write_json(_settings_path(layout), settings)
     state = assist_state(layout, now=now)
     audit(layout, "consent", "assist-on" if enabled else "assist-off", True,
           {"actor": actor, "until": state.get("until")})
