@@ -4306,6 +4306,7 @@ def reconcile_interrupted_mt_batches():
         names = sorted(os.listdir(MT_BATCH_DIR))
     except OSError:
         return changed
+    notices = {}
     with MT_BATCH_LOCK:
         for name in names:
             if not name.endswith(".json") or name.startswith("latest_"):
@@ -4321,24 +4322,52 @@ def reconcile_interrupted_mt_batches():
             touched = _mt_is_cancelled(state)
             if touched:
                 _mt_cancel_state(state)
+            had_inflight = False
             for item in state.get("items") or []:
                 if str(item.get("status")) in ("dispatching", "dispatched"):
                     item["status"] = "needs_reconcile"
                     item["error"] = "bot restarted during publish; verify manually"
                     item["reconciled_at"] = time.time()
                     touched = True
+                    had_inflight = True
             if touched:
                 state["status"] = "needs_reconcile"
                 state["reason"] = "bot restarted with an in-flight MT publish"
+                # 只在真的有在途条目时提示一次：已取消的历史批次每重启都会再次
+                # touched，逐个 reply 会把客户的会话刷屏。
+                notify = had_inflight and not state.get("reconcile_notified_at")
+                if notify:
+                    try:
+                        fresh = time.time() - os.path.getmtime(path) <= RECONCILE_NOTIFY_WINDOW
+                    except OSError:
+                        fresh = False
+                    if fresh:
+                        state["reconcile_notified_at"] = time.time()
+                        notices.setdefault(str(state.get("chat_id")), []).append(
+                            str(state.get("batch_id") or name))
                 save_mt_batch(state)
                 changed.append(state.get("batch_id"))
-                try:
-                    reply(state.get("chat_id"),
-                          "机器人重启时发现本批有在途发布，已停止后续条目；"
-                          "请先在抖音后台核对，确认没发出去后再重新发「发布」。")
-                except Exception:
-                    pass
+    for chat_id, batch_ids in notices.items():
+        try:
+            reply(chat_id, _reconcile_notice_text(batch_ids))
+        except Exception:
+            pass
     return changed
+
+
+#: 升级/重启时补扫历史批次：超过这个窗口的遗留批次只静默标记，不打扰客户。
+RECONCILE_NOTIFY_WINDOW = 6 * 3600
+
+
+def _reconcile_notice_text(batch_ids):
+    """One message per chat, even when several batches were interrupted."""
+    tail = "请先在抖音后台核对，确认没发出去后再重新发「发布」。"
+    if len(batch_ids) == 1:
+        return "机器人重启时发现本批有在途发布，已停止后续条目；" + tail
+    shown = "、".join(batch_ids[:3])
+    extra = "" if len(batch_ids) <= 3 else " 等 %d 批" % len(batch_ids)
+    return ("机器人重启时发现 %d 个批次有在途发布（%s%s），已停止这些批次的后续条目；"
+            % (len(batch_ids), shown, extra)) + tail
 
 
 def store_mt_prepared(chat_id, customer_id, result, device_id=None):
