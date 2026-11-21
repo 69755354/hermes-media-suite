@@ -84,3 +84,25 @@ def test_export_is_customer_only_and_has_panel_button():
     assert "diag-export" not in remote_policy.ALLOWED_CLI
     src = (ROOT / "agent" / "winport" / "panel.py").read_text(encoding="utf-8")
     assert "/api/diag-export" in src and "diag-export" in src
+
+
+def test_panel_serves_button_and_endpoint_end_to_end(tmp_path):
+    import socket
+    import threading
+    import urllib.request
+    from winport import panel
+    layout = _setup(tmp_path)
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    server, _h = panel.make_server(layout, [], port=port)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = "http://127.0.0.1:%d" % port
+        html = urllib.request.urlopen(base + "/").read().decode("utf-8")
+        assert "diag-export" in html
+        req = urllib.request.Request(base + "/api/diag-export", method="POST", headers={"Origin": base})
+        res = json.loads(urllib.request.urlopen(req).read())
+        assert res["ok"]
+        blob = "\n".join(_read_all(res["path"]).values())
+        assert not any(sec in blob for sec in SECRETS)
+    finally:
+        server.shutdown()
